@@ -46,7 +46,7 @@ static int cond_realize_tmpl(request_t *request,
 			     fr_value_box_t **out, fr_value_box_t **to_free,
 			     tmpl_t *in, tmpl_t *other, fr_value_box_t *async);
 
-/** Map keywords to #pair_list_t values
+/** Map keywords to #fr_pair_list_t values
  */
 static fr_table_num_sorted_t const cond_type_table[] = {
 	{ L("child"),		COND_TYPE_CHILD		},
@@ -140,7 +140,6 @@ static bool cond_eval_tmpl(request_t *request, tmpl_t const *in, fr_value_box_t 
 
 	switch (vpt->type) {
 	case TMPL_TYPE_ATTR:
-	case TMPL_TYPE_LIST:
 		/*
 		 *	No cast means that it's an existence check.
 		 */
@@ -336,7 +335,7 @@ done:
 	return p - out;
 }
 
-/** Turn a raw #tmpl_t into #fr_value_data_t, mostly.
+/** Turn a raw #tmpl_t into #fr_value_box_t, mostly.
  *
  *  It does nothing for lists, attributes, and precompiled regexes.
  *
@@ -361,12 +360,11 @@ static int cond_realize_tmpl(request_t *request,
 	/*
 	 *	These are handled elsewhere.
 	 */
-	case TMPL_TYPE_LIST:
 #ifdef HAVE_REGEX
 	case TMPL_TYPE_REGEX:
-#endif
 		fr_assert(!async);
 		return 0;
+#endif
 
 	case TMPL_TYPE_ATTR:
 		/*
@@ -735,7 +733,6 @@ check_attrs:
 	/*
 	 *	LHS is an attribute or list
 	 */
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_ATTR:
 	{
 		fr_pair_t		*vp;

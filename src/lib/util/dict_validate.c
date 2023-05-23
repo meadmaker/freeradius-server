@@ -208,13 +208,12 @@ bool dict_attr_flags_valid(fr_dict_t *dict, fr_dict_attr_t const *parent,
 			break;
 
 		case FR_TYPE_OCTETS:
+		case FR_TYPE_STRING:
 			if (flags->length != 0) {
-				fr_strerror_const("Cannot use [..] and length=uint16");
+				fr_strerror_const("Cannot use [..] and length=uint...");
 				return false;
 			}
-			FALL_THROUGH;
 
-		case FR_TYPE_STRING:
 			/*
 			 *	We can do arrays of variable-length types, so long as they have a "length="
 			 *	modifier.
@@ -291,15 +290,6 @@ bool dict_attr_flags_valid(fr_dict_t *dict, fr_dict_attr_t const *parent,
 		if ((flags->length != 2) && (flags->length != 4) && (flags->length != 8)) {
 			fr_strerror_printf("Invalid length %u for attribute of type '%s'",
 					   flags->length, fr_type_to_str(type));
-			return false;
-		}
-
-		if ((flags->flag_time_res != FR_TIME_RES_SEC) &&
-		    (flags->flag_time_res != FR_TIME_RES_MSEC) &&
-		    (flags->flag_time_res != FR_TIME_RES_USEC) &&
-		    (flags->flag_time_res != FR_TIME_RES_NSEC)) {
-			fr_strerror_printf("Invalid precision for attribute of type '%s'",
-					   fr_type_to_str(type));
 			return false;
 		}
 		break;
@@ -463,16 +453,8 @@ bool dict_attr_flags_valid(fr_dict_t *dict, fr_dict_attr_t const *parent,
 	if (flags->type_size) {
 		if ((type == FR_TYPE_DATE) || (type == FR_TYPE_TIME_DELTA)) {
 			/*
-			 *	Already checked above, but what the heck.
+			 *	Allow all time res here
 			 */
-			if ((flags->flag_time_res != FR_TIME_RES_SEC) &&
-			    (flags->flag_time_res != FR_TIME_RES_USEC) &&
-			    (flags->flag_time_res != FR_TIME_RES_MSEC) &&
-			    (flags->flag_time_res != FR_TIME_RES_NSEC)) {
-				fr_strerror_printf("Invalid precision for attribute of type '%s'",
-						   fr_type_to_str(type));
-				return false;
-			}
 		} else if (!flags->extra) {
 			if ((type != FR_TYPE_TLV) && (type != FR_TYPE_VENDOR)) {
 				fr_strerror_const("The 'format=' flag can only be used with attributes of type 'tlv'");
@@ -637,45 +619,70 @@ bool dict_attr_fields_valid(fr_dict_t *dict, fr_dict_attr_t const *parent,
 			    char const *name, int *attr, fr_type_t type, fr_dict_attr_flags_t *flags)
 {
 	fr_dict_attr_t const	*v;
+	fr_dict_attr_t *mutable;
 
 	if (!fr_cond_assert(parent)) return false;
 
 	if (fr_dict_valid_name(name, -1) <= 0) return false;
 
+	mutable = UNCONST(fr_dict_attr_t *, parent);
+
 	/******************** sanity check attribute number ********************/
 
-	if (parent->flags.is_root) {
+	/*
+	 *	The value -1 is the special flag for "self
+	 *	allocated" numbers.  i.e. we want an
+	 *	attribute, but we don't care what the number
+	 *	is.
+	 */
+	if (*attr == -1) {
 		/*
-		 *	The value -1 is the special flag for "self
-		 *	allocated" numbers.  i.e. we want an
-		 *	attribute, but we don't care what the number
-		 *	is.
+		 *	If we don't care about the number, then this attribute is almost always
+		 *	an internal one.  Unless it's a "name only" attribute for string-based
+		 *	protocols.
+		 *
+		 *	We can use DEFINE in number-based protocol dictionaries, and the attributes will be
+		 *	marked up as "internal".
 		 */
-		if (*attr == -1) {
-			flags->internal = 1;
+		flags->internal |= !flags->name_only | !dict->string_based;
 
-			v = fr_dict_attr_by_name(NULL, fr_dict_root(dict), name);
-			if (v) {
-				/*
-				 *	Exact duplicates are allowed.  The caller will take care of
-				 *	not inserting the duplicate attribute.
-				 */
-				if ((v->type == type) && (memcmp(&v->flags, flags, sizeof(*flags)) == 0)) {
-					return true;
-				}
+		v = fr_dict_attr_by_name(NULL, parent, name);
+		if (v) {
+			fr_dict_attr_flags_t cmp;
 
-				fr_strerror_printf("Conflicting definition for attribute %s", name);
+			/*
+			 *	Exact duplicates are allowed.  The caller will take care of
+			 *	not inserting the duplicate attribute.
+			 */
+			if (v->type != type) {
+				fr_strerror_printf("Conflicting type (asked %s, found %s) for re-definition for attribute %s",
+						   fr_type_to_str(type), fr_type_to_str(v->type), name);
 				return false;
 			}
-			*attr = ++dict->self_allocated;
 
-		} else if (*attr <= 0) {
-			fr_strerror_printf("ATTRIBUTE number %i is invalid, must be greater than zero", *attr);
-			return false;
+			/*
+			 *	'has_value' is set if we define VALUEs for it.  But the new definition doesn't
+			 *	know that yet.
+			 */
+			cmp = v->flags;
+			cmp.has_value = 0;
 
-		} else if ((unsigned int) *attr > dict->self_allocated) {
-			dict->self_allocated = *attr;
+			if (memcmp(&cmp, flags, sizeof(*flags)) != 0) {
+				fr_strerror_printf("Conflicting flags for re-definition for attribute %s", name);
+				return false;
+			}
+
+			return true;
 		}
+
+		*attr = ++mutable->last_child_attr;
+
+	} else if (*attr < 0) {
+		fr_strerror_printf("ATTRIBUTE number %i is invalid, must be greater than zero", *attr);
+		return false;
+
+	} else if ((unsigned int) *attr > mutable->last_child_attr) {
+		mutable->last_child_attr = *attr;
 
 		/*
 		 *	If the attribute is outside of the bounds of
@@ -685,14 +692,6 @@ bool dict_attr_fields_valid(fr_dict_t *dict, fr_dict_attr_t const *parent,
 		 *	checks.
 		 */
 		if ((uint64_t) *attr >= (((uint64_t)1) << (8 * parent->flags.type_size))) flags->internal = true;
-	}
-
-	/*
-	 *	Any other negative attribute number is wrong.
-	 */
-	if (*attr < 0) {
-		fr_strerror_printf("ATTRIBUTE number %i is invalid, must be greater than zero", *attr);
-		return false;
 	}
 
 	/*

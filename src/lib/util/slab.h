@@ -1,3 +1,4 @@
+#pragma once
 /*
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,6 +30,26 @@ extern "C" {
 #include <freeradius-devel/util/dlist.h>
 #include <freeradius-devel/util/event.h>
 
+/** CONF_PARSER entries to populate user configurable slab values
+ */
+#define FR_SLAB_CONFIG_CONF_PARSER \
+	{ FR_CONF_OFFSET("min", FR_TYPE_UINT32, fr_slab_config_t, min_elements), .dflt = "10" }, \
+	{ FR_CONF_OFFSET("max", FR_TYPE_UINT32, fr_slab_config_t, max_elements), .dflt = "100" }, \
+	{ FR_CONF_OFFSET("cleanup_interval", FR_TYPE_TIME_DELTA, fr_slab_config_t, interval), .dflt = "30s" }, \
+
+/** Tuneable parameters for slabs
+ */
+typedef struct { \
+	unsigned int		elements_per_slab;	//!< Number of elements to allocate per slab.
+	unsigned int		min_elements;		//!< Minimum number of elements to keep allocated.
+	unsigned int		max_elements;		//!< Maximum number of elements to allocate using slabs.
+	bool			at_max_fail;		//!< Should requests for additional elements fail when the
+							///< number in use has reached max_elements.
+	unsigned int		num_children;		//!< How many child allocations are expected off each element.
+	size_t			child_pool_size;	//!< Size of pool space to be allocated to each element.
+	fr_time_delta_t		interval;		//!< Interval between slab cleanup events being fired.
+} fr_slab_config_t;
+
 /** Define type specific wrapper structs for slabs and slab elements
  *
  * @note This macro should be used inside the header for the area of code
@@ -49,48 +70,44 @@ extern "C" {
  * @param[in] _type	of structure which will be held in the slab elements.
  */
 #define FR_SLAB_TYPES(_name, _type) \
-	FR_DLIST_TYPES(fr_ ## _name ## _slab) \
-	FR_DLIST_TYPES(fr_ ## _name ## _slab_element) \
+	FR_DLIST_TYPES(_name ## _slab) \
+	FR_DLIST_TYPES(_name ## _slab_element) \
 \
-	typedef int (*fr_ ## _type ## _slab_free_t)(_type *elem, void *uctx); \
-	typedef int (*fr_ ## _type ## _slab_alloc_t)(_type *elem, void *uctx); \
+	typedef int (*_type ## _slab_free_t)(_type *elem, void *uctx); \
+	typedef int (*_type ## _slab_alloc_t)(_type *elem, void *uctx); \
+	typedef int (*_type ## _slab_reserve_t)(_type *elem, void *uctx); \
 \
 	typedef struct { \
-		FR_DLIST_HEAD(fr_ ## _name ## _slab)	reserved; \
-		FR_DLIST_HEAD(fr_ ## _name ## _slab)	avail; \
+		FR_DLIST_HEAD(_name ## _slab)	reserved; \
+		FR_DLIST_HEAD(_name ## _slab)	avail; \
 		fr_event_list_t				*el; \
 		fr_event_timer_t const			*ev; \
-		unsigned int				elements_per_slab; \
-		unsigned int				min_elements; \
-		unsigned int				max_elements; \
+		fr_slab_config_t			config; \
 		unsigned int				in_use; \
 		unsigned int				high_water_mark; \
-		bool					at_max_fail; \
-		unsigned int				num_children; \
-		size_t					child_pool_size; \
-		fr_ ## _type ## _slab_alloc_t		alloc; \
+		_type ## _slab_alloc_t		alloc; \
+		_type ## _slab_reserve_t		reserve; \
 		void					*uctx; \
 		bool					release_reset; \
-		bool					reserve_init; \
-	} fr_ ## _name ## _slab_list_t; \
+		bool					reserve_mru; \
+	} _name ## _slab_list_t; \
 \
 	typedef struct { \
-		FR_DLIST_ENTRY(fr_ ## _name ## _slab)		entry; \
-		fr_ ## _name ## _slab_list_t			*list; \
+		FR_DLIST_ENTRY(_name ## _slab)		entry; \
+		_name ## _slab_list_t			*list; \
 		TALLOC_CTX					*pool; \
-		FR_DLIST_HEAD(fr_ ## _name ## _slab_element)	reserved; \
-		FR_DLIST_HEAD(fr_ ## _name ## _slab_element)	avail; \
-	} fr_ ## _name ## _slab_t; \
+		FR_DLIST_HEAD(_name ## _slab_element)	reserved; \
+		FR_DLIST_HEAD(_name ## _slab_element)	avail; \
+	} _name ## _slab_t; \
 \
 	typedef struct { \
 		_type						elem; \
-		FR_DLIST_ENTRY(fr_ ## _name ## _slab_element)	entry; \
+		FR_DLIST_ENTRY(_name ## _slab_element)	entry; \
 		bool						in_use; \
-		bool						initialised; \
-		fr_ ## _name ## _slab_t 			*slab; \
-		fr_ ## _type ## _slab_free_t 			free; \
+		_name ## _slab_t 			*slab; \
+		_type ## _slab_free_t 			free; \
 		void						*uctx; \
-	} fr_ ## _name ## _slab_element_t;
+	} _name ## _slab_element_t;
 
 /** Define type specific wrapper functions for slabs and slab elements
  *
@@ -99,12 +116,12 @@ extern "C" {
  *
  * @param[in] _name	used in type specific structures.
  * @param[in] _type	of structure returned by the reserve function.
- * @param[in] _interval	between cleanup events.
  */
-#define FR_SLAB_FUNCS(_name, _type, _interval) \
-	FR_DLIST_FUNCS(fr_ ## _name ## _slab, fr_ ## _name ## _slab_t, entry) \
-	FR_DLIST_FUNCS(fr_ ## _name ## _slab_element, fr_ ## _name ## _slab_element_t, entry) \
+#define FR_SLAB_FUNCS(_name, _type) \
+	FR_DLIST_FUNCS(_name ## _slab, _name ## _slab_t, entry) \
+	FR_DLIST_FUNCS(_name ## _slab_element, _name ## _slab_element_t, entry) \
 \
+DIAG_OFF(unused-function) \
 	/** Timer event for freeing unused slabs \
 	 * \
 	 * Called periodically to clear up slab allocations. \
@@ -114,95 +131,94 @@ extern "C" {
 	 */ \
 	 static void _ ## _name ## _slab_cleanup(fr_event_list_t *el, UNUSED fr_time_t now, void *uctx) \
 	 { \
-	 	fr_ ## _name ## _slab_list_t	*slab_list = talloc_get_type_abort(uctx, fr_ ## _name ## _slab_list_t); \
-		fr_ ## _name ## _slab_t		*slab = NULL, *next_slab = NULL; \
+	 	_name ## _slab_list_t	*slab_list = talloc_get_type_abort(uctx, _name ## _slab_list_t); \
+		_name ## _slab_t		*slab = NULL, *next_slab = NULL; \
 		unsigned int			to_clear, cleared = 0; \
 		to_clear = (slab_list->high_water_mark - slab_list->in_use) / 2; \
-		if ((slab_list->in_use + to_clear) < slab_list->min_elements) \
-			to_clear = slab_list->high_water_mark - slab_list->min_elements; \
-		if (to_clear < slab_list->elements_per_slab) goto finish; \
-		slab = fr_ ## _name ## _slab_head(&slab_list->avail); \
+		if ((slab_list->in_use + to_clear) < slab_list->config.min_elements) \
+			to_clear = slab_list->high_water_mark - slab_list->config.min_elements; \
+		if (to_clear < slab_list->config.elements_per_slab) goto finish; \
+		slab = _name ## _slab_head(&slab_list->avail); \
 		while (slab) { \
-			next_slab = fr_ ## _name ## _slab_next(&slab_list->avail, slab); \
-			if (fr_ ## _name ## _slab_element_num_elements(&slab->reserved) > 0) goto next; \
-			fr_ ## _name ## _slab_remove(&slab_list->avail, slab); \
-			cleared += fr_ ## _name ## _slab_element_num_elements(&slab->avail); \
-			to_clear -= fr_ ## _name ## _slab_element_num_elements(&slab->avail); \
-			fr_ ## _name ## _slab_element_talloc_free(&slab->avail); \
+			next_slab = _name ## _slab_next(&slab_list->avail, slab); \
+			if (_name ## _slab_element_num_elements(&slab->reserved) > 0) goto next; \
+			_name ## _slab_remove(&slab_list->avail, slab); \
+			cleared += _name ## _slab_element_num_elements(&slab->avail); \
+			to_clear -= _name ## _slab_element_num_elements(&slab->avail); \
+			_name ## _slab_element_talloc_free(&slab->avail); \
 			talloc_free(slab); \
-			if (to_clear < slab_list->elements_per_slab) break; \
+			if (to_clear < slab_list->config.elements_per_slab) break; \
 		next: \
 			slab = next_slab; \
 		} \
 		slab_list->high_water_mark -= cleared; \
 	finish: \
-		(void) fr_event_timer_in(slab_list, el, &slab_list->ev, _interval, _ ## _name ## _slab_cleanup, slab_list); \
+		(void) fr_event_timer_in(slab_list, el, &slab_list->ev, slab_list->config.interval, \
+					 _ ## _name ## _slab_cleanup, slab_list); \
 	 } \
 \
 	/** Allocate a slab list to manage slabs of allocated memory \
 	 * \
 	 * @param[in] ctx		in which to allocate the slab list. \
-	 * @param[out] out		slab_list that has been allocated. \
 	 * @param[in] el		Event list in which to run clean up function. \
-	 * @param[in] elements_per_slab	How many elements should be allocated in each slab. \
-	 * @param[in] min_elements	Minimum number of elements to leave allocated. \
-	 * @param[in] max_elements	Maximun number of elements to allocate in slabs. \
-	 * @param[in] at_max_fail	If true, no elements will be allocated beyond max_elements. \
-	 * @param[in] num_children	Number of children expected to be allocated from each element. \
-	 * @param[in] child_pool_size	Additional memory to allocate to each element for child allocations. \
+	 * @param[in] config		Slab config parameters. \
 	 * @param[in] alloc		Optional callback to use when allocating new elements. \
-	 * @param[in] uctx		to pass to allocation callback. \
+	 * @param[in] reserve		Optional callback run on element reserving. \
+	 * @param[in] uctx		to pass to callbacks. \
 	 * @param[in] release_reset	Should elements be reset and children freed when the element is released.\
-	 * @param[in] reserve_init	Should elements be initialised with the alloc function each time they are reserved.\
+	 * @param[in] reserve_mru	If true, the most recently used element will be returned when an element is reserved. \
+	 * @return \
+	 *	- A new slab. \
+	 *	- NULL on error. \
 	 */ \
-	static inline CC_HINT(nonnull(2)) int fr_ ## _name ## _slab_list_alloc(TALLOC_CTX *ctx, \
-									       fr_ ## _name ## _slab_list_t **out, \
-									       fr_event_list_t *el, \
-									       unsigned int elements_per_slab, \
-									       unsigned int min_elements, \
-									       unsigned int max_elements, \
-									       bool at_max_fail, \
-									       size_t num_children, \
-									       size_t child_pool_size, \
-									       fr_ ## _type ## _slab_alloc_t alloc, \
-									       void *uctx, \
-									       bool release_reset, \
-									       bool reserve_init) \
+	static inline _name ## _slab_list_t *_name ## _slab_list_alloc(TALLOC_CTX *ctx, \
+								       fr_event_list_t *el, \
+								       fr_slab_config_t const *config, \
+								       _type ## _slab_alloc_t alloc, \
+								       _type ## _slab_reserve_t reserve, \
+								       void *uctx, \
+								       bool release_reset, \
+								       bool reserve_mru) \
 	{ \
-		MEM(*out = talloc_zero(ctx, fr_ ## _name ## _slab_list_t)); \
-		(*out)->el = el; \
-		(*out)->elements_per_slab = elements_per_slab; \
-		(*out)->min_elements = min_elements; \
-		(*out)->max_elements = max_elements; \
-		(*out)->at_max_fail = at_max_fail; \
-		(*out)->alloc = alloc; \
-		(*out)->num_children = num_children, \
-		(*out)->child_pool_size = child_pool_size, \
-		(*out)->uctx = uctx; \
-		(*out)->release_reset = release_reset; \
-		(*out)->reserve_init = reserve_init; \
-		fr_ ## _name ## _slab_init(&(*out)->reserved); \
-		fr_ ## _name ## _slab_init(&(*out)->avail); \
-		if (el) (void) fr_event_timer_in(*out, el, &(*out)->ev, _interval, _ ## _name ## _slab_cleanup, *out); \
-		return 0; \
+		_name ## _slab_list_t *slab; \
+		MEM(slab = talloc_zero(ctx, _name ## _slab_list_t)); \
+		slab->el = el; \
+		slab->config = *config; \
+		if (slab->config.elements_per_slab == 0) { \
+			slab->config.elements_per_slab = (config->min_elements ? config->min_elements : 1); \
+		} \
+		slab->alloc = alloc; \
+		slab->reserve = reserve; \
+		slab->uctx = uctx; \
+		slab->release_reset = release_reset; \
+		slab->reserve_mru = reserve_mru; \
+		_name ## _slab_init(&slab->reserved); \
+		_name ## _slab_init(&slab->avail); \
+		if (el) { \
+			if (unlikely(fr_event_timer_in(slab, el, &slab->ev, config->interval, _ ## _name ## _slab_cleanup, slab) < 0)) { \
+				talloc_free(slab); \
+				return NULL; \
+			}; \
+		} \
+		return slab; \
 	} \
 \
 	/** Callback for talloc freeing a slab element \
 	 * \
-	 * Ensure that the custom destructor is called even if \
+	 * Ensure that the element reset and custom destructor is called even if \
 	 * the element is not released before being freed. \
 	 * Also ensure the element is removed from the relevant list. \
 	 */ \
-	static int _ ## _type ## _element_free(fr_ ## _name ## _slab_element_t *element) \
+	static int _ ## _type ## _element_free(_name ## _slab_element_t *element) \
 	{ \
-		fr_ ## _name ## _slab_t	*slab; \
+		_name ## _slab_t	*slab; \
 		if (element->in_use && element->free) element->free(( _type *)element, element->uctx); \
 		if (!element->slab) return 0; \
 		slab = element->slab; \
 		if (element->in_use) { \
-			fr_ ## _name ## _slab_element_remove(&slab->reserved, element); \
+			_name ## _slab_element_remove(&slab->reserved, element); \
 		} else { \
-			fr_ ## _name ## _slab_element_remove(&slab->avail, element); \
+			_name ## _slab_element_remove(&slab->avail, element); \
 		} \
 		return 0; \
 	} \
@@ -216,34 +232,37 @@ extern "C" {
 	 * @param[in] slab_list		to reserve an element from. \
 	 * @return a slab element. \
 	 */ \
-	static inline CC_HINT(nonnull) _type *fr_ ## _name ## _slab_reserve(fr_ ## _name ## _slab_list_t *slab_list) \
+	static inline CC_HINT(nonnull) _type *_name ## _slab_reserve(_name ## _slab_list_t *slab_list) \
 	{ \
-		fr_ ## _name ## _slab_t		*slab; \
-		fr_ ## _name ## _slab_element_t	*element = NULL; \
+		_name ## _slab_t		*slab; \
+		_name ## _slab_element_t	*element = NULL; \
 \
-		slab = fr_ ## _name ## _slab_head(&slab_list->avail); \
-		if (!slab && ((fr_ ## _name ## _slab_num_elements(&slab_list->reserved) * \
-			       slab_list->elements_per_slab) < slab_list->max_elements)) { \
-			fr_ ## _name ## _slab_element_t *new_element; \
+		slab = slab_list->reserve_mru ? _name ## _slab_tail(&slab_list->avail) : \
+						_name ## _slab_head(&slab_list->avail); \
+		if (!slab && ((_name ## _slab_num_elements(&slab_list->reserved) * \
+			       slab_list->config.elements_per_slab) < slab_list->config.max_elements)) { \
+			_name ## _slab_element_t *new_element; \
 			unsigned int count, elems; \
 			size_t elem_size; \
-			elems = slab_list->elements_per_slab * (1 + slab_list->num_children); \
-			elem_size = slab_list->elements_per_slab * (sizeof(fr_ ## _name ## _slab_element_t) + slab_list->child_pool_size); \
-			MEM(slab = talloc_zero_pooled_object(slab_list, fr_ ## _name ## _slab_t, elems, elem_size)); \
-			fr_ ## _name ## _slab_element_init(&slab->avail); \
-			fr_ ## _name ## _slab_element_init(&slab->reserved); \
-			fr_ ## _name ## _slab_insert_head(&slab_list->avail, slab); \
+			elems = slab_list->config.elements_per_slab * (1 + slab_list->config.num_children); \
+			elem_size = slab_list->config.elements_per_slab * (sizeof(_name ## _slab_element_t) + \
+									   slab_list->config.child_pool_size); \
+			MEM(slab = talloc_zero_pooled_object(slab_list, _name ## _slab_t, elems, elem_size)); \
+			_name ## _slab_element_init(&slab->avail); \
+			_name ## _slab_element_init(&slab->reserved); \
+			_name ## _slab_insert_head(&slab_list->avail, slab); \
 			slab->list = slab_list; \
-			for (count = 0; count < slab_list->elements_per_slab; count++) { \
-				if (slab_list->num_children > 0) { \
-					MEM(new_element = talloc_zero_pooled_object(slab, fr_ ## _name ## _slab_element_t, \
-										    slab_list->num_children, \
-										    slab_list->child_pool_size)); \
+			for (count = 0; count < slab_list->config.elements_per_slab; count++) { \
+				if (slab_list->config.num_children > 0) { \
+					MEM(new_element = talloc_zero_pooled_object(slab, _name ## _slab_element_t, \
+										    slab_list->config.num_children, \
+										    slab_list->config.child_pool_size)); \
 				} else { \
-					MEM(new_element = talloc_zero(slab, fr_ ## _name ## _slab_element_t)); \
+					MEM(new_element = talloc_zero(slab, _name ## _slab_element_t)); \
 				} \
+				talloc_set_type(new_element, _type); \
 				talloc_set_destructor(new_element, _ ## _type ## _element_free); \
-				fr_ ## _name ## _slab_element_insert_tail(&slab->avail, new_element); \
+				_name ## _slab_element_insert_tail(&slab->avail, new_element); \
 				new_element->slab = slab; \
 			} \
 			/* Initialisation of new elements done after allocation to ensure \
@@ -251,39 +270,37 @@ extern "C" {
 			 * by the callback may take memory from the pool. \
 			 * Any elements which fail to initialise are freed immediately. */ \
 			if (slab_list->alloc) { \
-				fr_ ## _name ## _slab_element_t *prev = NULL; \
+				_name ## _slab_element_t *prev = NULL; \
 				new_element = NULL; \
-				while ((new_element = fr_ ## _name ## _slab_element_next(&slab->avail, new_element))) { \
+				while ((new_element = _name ## _slab_element_next(&slab->avail, new_element))) { \
 					if (slab_list->alloc((_type *)new_element, slab_list->uctx) < 0) { \
-						prev = fr_ ## _name ## _slab_element_remove(&slab->avail, new_element); \
+						prev = _name ## _slab_element_remove(&slab->avail, new_element); \
 						talloc_free(new_element); \
 						new_element = prev; \
 						continue; \
 					} \
-					new_element->initialised = true; \
 				} \
 			} \
-			slab_list->high_water_mark += fr_ ## _name ## _slab_element_num_elements(&slab->avail); \
+			slab_list->high_water_mark += _name ## _slab_element_num_elements(&slab->avail); \
 		} \
-		if (!slab && slab_list->at_max_fail) return NULL; \
-		if (slab) element = fr_ ## _name ## _slab_element_pop_head(&slab->avail); \
+		if (!slab && slab_list->config.at_max_fail) return NULL; \
+		if (slab) element = slab_list->reserve_mru ? _name ## _slab_element_pop_tail(&slab->avail) : \
+							     _name ## _slab_element_pop_head(&slab->avail); \
 		if (element) { \
-			fr_ ## _name ## _slab_element_insert_tail(&slab->reserved, element); \
-			if (fr_ ## _name ## _slab_element_num_elements(&slab->avail) == 0) { \
-				fr_ ## _name ## _slab_remove(&slab_list->avail, slab); \
-				fr_ ## _name ## _slab_insert_tail(&slab_list->reserved, slab); \
-			} \
-			if (slab_list->reserve_init && slab_list->alloc && !element->initialised) { \
-				slab_list->alloc((_type *)element, slab_list->uctx); \
-				element->initialised = true; \
+			_name ## _slab_element_insert_tail(&slab->reserved, element); \
+			if (_name ## _slab_element_num_elements(&slab->avail) == 0) { \
+				_name ## _slab_remove(&slab_list->avail, slab); \
+				_name ## _slab_insert_tail(&slab_list->reserved, slab); \
 			} \
 			element->in_use = true; \
 			slab_list->in_use++; \
 		} else { \
-			MEM(element = talloc_zero(slab_list, fr_ ## _name ## _slab_element_t)); \
+			MEM(element = talloc_zero(slab_list, _name ## _slab_element_t)); \
+			talloc_set_type(element, _type); \
 			talloc_set_destructor(element, _ ## _type ## _element_free); \
 			if (slab_list->alloc) slab_list->alloc((_type *)element, slab_list->uctx); \
 		} \
+		if (slab_list->reserve) slab_list->reserve((_type *)element, slab_list->uctx); \
 		return (_type *)element; \
 	} \
 \
@@ -293,9 +310,9 @@ extern "C" {
 	 * @param[in] func	Function to attach. \
 	 * @param[in] uctx	to be passed to func. \
 	 */ \
-	static inline CC_HINT(nonnull(1,2)) void fr_ ## _type ## _slab_set_destructor(_type *elem, fr_ ## _type ## _slab_free_t func, void *uctx) \
+	static inline CC_HINT(nonnull(1,2)) void _name ## _slab_element_set_destructor(_type *elem, _type ## _slab_free_t func, void *uctx) \
 	{ \
-		fr_ ## _name ## _slab_element_t	*element = (fr_ ## _name ## _slab_element_t *)elem; \
+		_name ## _slab_element_t	*element = (_name ## _slab_element_t *)elem; \
 		element->free = func; \
 		element->uctx = uctx; \
 	} \
@@ -307,44 +324,44 @@ extern "C" {
 	 * \
 	 * @param[in] elem	to release. \
 	 */ \
-	static inline CC_HINT(nonnull) void fr_ ## _name ## _slab_release(_type *elem) \
+	static inline CC_HINT(nonnull) void _name ## _slab_release(_type *elem) \
 	{ \
-		fr_ ## _name ## _slab_element_t *element = (fr_ ## _name ## _slab_element_t *)elem; \
-		fr_ ## _name ## _slab_t *slab = element->slab; \
+		_name ## _slab_element_t *element = (_name ## _slab_element_t *)elem; \
+		_name ## _slab_t *slab = element->slab; \
 		if (element->free) element->free(elem, element->uctx); \
 		if (slab) { \
-			fr_ ## _name ## _slab_list_t	*slab_list; \
+			_name ## _slab_list_t	*slab_list; \
 			slab_list = slab->list; \
-			fr_ ## _name ## _slab_element_remove(&slab->reserved, element); \
+			_name ## _slab_element_remove(&slab->reserved, element); \
 			if (slab_list->release_reset){ \
 				talloc_free_children(element); \
 				memset(&element->elem, 0, sizeof(_type)); \
 				element->free = NULL; \
 				element->uctx = NULL; \
 			} \
-			fr_ ## _name ## _slab_element_insert_tail(&slab->avail, element); \
-			if (fr_ ## _name ## _slab_element_num_elements(&slab->avail) == 1) { \
-				fr_ ## _name ## _slab_remove(&slab_list->reserved, slab); \
-				fr_ ## _name ## _slab_insert_tail(&slab_list->avail, slab); \
+			_name ## _slab_element_insert_tail(&slab->avail, element); \
+			if (_name ## _slab_element_num_elements(&slab->avail) == 1) { \
+				_name ## _slab_remove(&slab_list->reserved, slab); \
+				_name ## _slab_insert_tail(&slab_list->avail, slab); \
 			} \
 			slab_list->in_use--; \
-			element->initialised = false; \
+			element->in_use = false; \
 			return; \
 		} \
-		element->in_use = false; \
 		talloc_free(element); \
 	} \
 \
-	static inline CC_HINT(nonnull) unsigned int fr_ ## _name ## _slab_num_elements_used(fr_ ## _name ## _slab_list_t *slab_list) \
+	static inline CC_HINT(nonnull) unsigned int _name ## _slab_num_elements_used(_name ## _slab_list_t *slab_list) \
 	{ \
 		return slab_list->in_use; \
 	} \
 \
-	static inline CC_HINT(nonnull) unsigned int fr_ ## _name ## _slab_num_allocated(fr_ ## _name ## _slab_list_t *slab_list) \
+	static inline CC_HINT(nonnull) unsigned int _name ## _slab_num_allocated(_name ## _slab_list_t *slab_list) \
 	{ \
-		return fr_ ## _name ## _slab_num_elements(&slab_list->reserved) + \
-		       fr_ ## _name ## _slab_num_elements(&slab_list->avail); \
-	}
+		return _name ## _slab_num_elements(&slab_list->reserved) + \
+		       _name ## _slab_num_elements(&slab_list->avail); \
+	} \
+DIAG_ON(unused-function)
 
 #ifdef __cplusplus
 }

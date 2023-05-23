@@ -33,6 +33,7 @@ RCSID("$Id$")
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/util/table.h>
 #include <freeradius-devel/util/uri.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include <ctype.h>
 #include "rest.h"
@@ -140,6 +141,8 @@ static const CONF_PARSER module_config[] = {
 	{ FR_CONF_OFFSET("connect_proxy", FR_TYPE_STRING, rlm_rest_t, connect_proxy), .func = rest_proxy_parse },
 	{ FR_CONF_OFFSET("http_negotiation", FR_TYPE_VOID, rlm_rest_t, http_negotiation),
 	  .func = cf_table_parse_int, .uctx = &(cf_table_parse_ctx_t){ .table = http_negotiation_table, .len = &http_negotiation_table_len }, .dflt = "default" },
+
+	{ FR_CONF_OFFSET("connection", FR_TYPE_SUBSECTION, rlm_rest_t, conn_config), .subcs = (void const *) fr_curl_conn_config },
 
 #ifdef CURLPIPE_MULTIPLEX
 	{ FR_CONF_OFFSET("multiplex", FR_TYPE_BOOL, rlm_rest_t, multiplex), .dflt = "yes" },
@@ -260,10 +263,8 @@ static int rlm_rest_perform(module_ctx_t const *mctx,
 
 static xlat_action_t rest_xlat_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				      xlat_ctx_t const *xctx,
-				      request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+				      request_t *request, UNUSED fr_value_box_list_t *in)
 {
-	rlm_rest_t const		*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_rest_t);
-	rlm_rest_thread_t		*t = talloc_get_type_abort(xctx->mctx->thread, rlm_rest_thread_t);
 	rlm_rest_xlat_rctx_t		*rctx = talloc_get_type_abort(xctx->rctx, rlm_rest_xlat_rctx_t);
 	int				hcode;
 	ssize_t				len;
@@ -310,6 +311,15 @@ error:
 		}
 	}
 
+finish:
+	/*
+	 *	Always output the xlat data.
+	 *
+	 *	The user can check REST-HTTP-Status-Code to figure out what happened.
+	 *
+	 *	Eventually we should just emit two boxes, one with the response code
+	 *	and one with the body.
+	 */
 	len = rest_get_handle_data(&body, handle);
 	if (len > 0) {
 		fr_value_box_t *vb;
@@ -319,10 +329,7 @@ error:
 		fr_dcursor_insert(out, vb);
 	}
 
-finish:
-	rest_request_cleanup(inst, handle);
-
-	fr_pool_connection_release(t->pool, request, handle);
+	rest_slab_release(handle);
 
 	talloc_free(rctx);
 
@@ -379,7 +386,8 @@ static fr_uri_part_t const rest_uri_parts[] = {
 };
 
 static xlat_arg_parser_t const rest_xlat_args[] = {
-	{ .required = true, .variadic = true, .type = FR_TYPE_STRING },
+	{ .required = true, .type = FR_TYPE_STRING },
+	{ .variadic = XLAT_ARG_VARIADIC_EMPTY_KEEP, .type = FR_TYPE_STRING },
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -394,7 +402,7 @@ static xlat_arg_parser_t const rest_xlat_args[] = {
  */
 static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx, request_t *request,
-			       FR_DLIST_HEAD(fr_value_box_list) *in)
+			       fr_value_box_list_t *in)
 {
 	rlm_rest_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_rest_t);
 	rlm_rest_thread_t		*t = talloc_get_type_abort(xctx->mctx->thread, rlm_rest_thread_t);
@@ -439,13 +447,12 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	 	 */
 		} else {
 			section->method = REST_HTTP_METHOD_CUSTOM;
-			MEM(section->method_str = talloc_bstrndup(rctx, in_vb->vb_strvalue, in_vb->vb_length));
+			MEM(section->method_str = talloc_bstrndup(rctx, uri_vb->vb_strvalue, uri_vb->vb_length));
 		}
 		/*
 		 *	Move to next argument
 		 */
 		in_vb = fr_value_box_list_pop_head(in);
-		uri_vb = NULL;
 	} else {
 		section->method = REST_HTTP_METHOD_GET;
 	}
@@ -454,7 +461,7 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	 *	We get a connection from the pool here as the CURL object
 	 *	is needed to use curl_easy_escape() for escaping
 	 */
-	randle = rctx->handle = fr_pool_connection_get(t->pool, request);
+	randle = rctx->handle = rest_slab_reserve(t->slab);
 	if (!randle) return XLAT_ACTION_FAIL;
 
 	/*
@@ -471,8 +478,7 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 		RPEDEBUG("Failed escaping URI");
 
 	error:
-		rest_request_cleanup(inst, randle);
-		fr_pool_connection_release(t->pool, request, randle);
+		rest_slab_release(randle);
 		talloc_free(section);
 
 		return XLAT_ACTION_FAIL;
@@ -513,7 +519,7 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	 *
 	 *  @todo We could extract the User-Name and password from the URL string.
 	 */
-	ret = rest_request_config(MODULE_CTX(dl_module_instance_by_data(inst), t, NULL),
+	ret = rest_request_config(MODULE_CTX(dl_module_instance_by_data(inst), t, NULL, NULL),
 				  section, request, randle, section->method,
 				  section->body, uri_vb->vb_strvalue, NULL, NULL);
 	if (ret < 0) goto error;
@@ -527,13 +533,12 @@ static xlat_action_t rest_xlat(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 	ret = fr_curl_io_request_enqueue(t->mhandle, request, randle);
 	if (ret < 0) goto error;
 
-	return unlang_xlat_yield(request, rest_xlat_resume, rest_io_xlat_signal, rctx);
+	return unlang_xlat_yield(request, rest_xlat_resume, rest_io_xlat_signal, ~FR_SIGNAL_CANCEL, rctx);
 }
 
 static unlang_action_t mod_authorize_result(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
 	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
-	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -606,9 +611,7 @@ static unlang_action_t mod_authorize_result(rlm_rcode_t *p_result, module_ctx_t 
 	}
 
 finish:
-	rest_request_cleanup(inst, handle);
-
-	fr_pool_connection_release(t->pool, request, handle);
+	rest_slab_release(handle);
 
 	RETURN_MODULE_RCODE(rcode);
 }
@@ -630,25 +633,23 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 
 	if (!section->name) RETURN_MODULE_NOOP;
 
-	handle = fr_pool_connection_get(t->pool, request);
+	handle = rest_slab_reserve(t->slab);
 	if (!handle) RETURN_MODULE_FAIL;
 
 	ret = rlm_rest_perform(mctx, section, handle, request, NULL, NULL);
 	if (ret < 0) {
-		rest_request_cleanup(inst, handle);
-		fr_pool_connection_release(t->pool, request, handle);
+		rest_slab_release(handle);
 
 		RETURN_MODULE_FAIL;
 	}
 
-	return unlang_module_yield(request, mod_authorize_result, rest_io_module_signal, handle);
+	return unlang_module_yield(request, mod_authorize_result, rest_io_module_signal, ~FR_SIGNAL_CANCEL, handle);
 }
 
 static unlang_action_t mod_authenticate_result(rlm_rcode_t *p_result,
 					       module_ctx_t const *mctx, request_t *request)
 {
 	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
-	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -721,9 +722,7 @@ static unlang_action_t mod_authenticate_result(rlm_rcode_t *p_result,
 	}
 
 finish:
-	rest_request_cleanup(inst, handle);
-
-	fr_pool_connection_release(t->pool, request, handle);
+	rest_slab_release(handle);
 
 	RETURN_MODULE_RCODE(rcode);
 }
@@ -779,25 +778,23 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 		RDEBUG2("Login attempt with password");
 	}
 
-	handle = fr_pool_connection_get(t->pool, request);
+	handle = rest_slab_reserve(t->slab);
 	if (!handle) RETURN_MODULE_FAIL;
 
 	ret = rlm_rest_perform(mctx, section,
 			       handle, request, username->vp_strvalue, password->vp_strvalue);
 	if (ret < 0) {
-		rest_request_cleanup(inst, handle);
-		fr_pool_connection_release(t->pool, request, handle);
+		rest_slab_release(handle);
 
 		RETURN_MODULE_FAIL;
 	}
 
-	return unlang_module_yield(request, mod_authenticate_result, rest_io_module_signal, handle);
+	return unlang_module_yield(request, mod_authenticate_result, rest_io_module_signal, ~FR_SIGNAL_CANCEL, handle);
 }
 
 static unlang_action_t mod_accounting_result(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
 	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
-	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -838,9 +835,7 @@ static unlang_action_t mod_accounting_result(rlm_rcode_t *p_result, module_ctx_t
 	}
 
 finish:
-	rest_request_cleanup(inst, handle);
-
-	fr_pool_connection_release(t->pool, request, handle);
+	rest_slab_release(handle);
 
 	RETURN_MODULE_RCODE(rcode);
 }
@@ -859,24 +854,22 @@ static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, mo
 
 	if (!section->name) RETURN_MODULE_NOOP;
 
-	handle = fr_pool_connection_get(t->pool, request);
+	handle = rest_slab_reserve(t->slab);
 	if (!handle) RETURN_MODULE_FAIL;
 
 	ret = rlm_rest_perform(mctx, section, handle, request, NULL, NULL);
 	if (ret < 0) {
-		rest_request_cleanup(inst, handle);
-		fr_pool_connection_release(t->pool, request, handle);
+		rest_slab_release(handle);
 
 		RETURN_MODULE_FAIL;
 	}
 
-	return unlang_module_yield(request, mod_accounting_result, rest_io_module_signal, handle);
+	return unlang_module_yield(request, mod_accounting_result, rest_io_module_signal, ~FR_SIGNAL_CANCEL, handle);
 }
 
 static unlang_action_t mod_post_auth_result(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
 	rlm_rest_t const		*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_rest_t);
-	rlm_rest_thread_t		*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_section_t const 	*section = &inst->authenticate;
 	fr_curl_io_request_t		*handle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 
@@ -917,9 +910,7 @@ static unlang_action_t mod_post_auth_result(rlm_rcode_t *p_result, module_ctx_t 
 	}
 
 finish:
-	rest_request_cleanup(inst, handle);
-
-	fr_pool_connection_release(t->pool, request, handle);
+	rest_slab_release(handle);
 
 	RETURN_MODULE_RCODE(rcode);
 }
@@ -938,19 +929,17 @@ static unlang_action_t CC_HINT(nonnull) mod_post_auth(rlm_rcode_t *p_result, mod
 
 	if (!section->name) RETURN_MODULE_NOOP;
 
-	handle = fr_pool_connection_get(t->pool, request);
+	handle = rest_slab_reserve(t->slab);
 	if (!handle) RETURN_MODULE_FAIL;
 
 	ret = rlm_rest_perform(mctx, section, handle, request, NULL, NULL);
 	if (ret < 0) {
-		rest_request_cleanup(inst, handle);
-
-		fr_pool_connection_release(t->pool, request, handle);
+		rest_slab_release(handle);
 
 		RETURN_MODULE_FAIL;
 	}
 
-	return unlang_module_yield(request, mod_post_auth_result, rest_io_module_signal, handle);
+	return unlang_module_yield(request, mod_post_auth_result, rest_io_module_signal, ~FR_SIGNAL_CANCEL, handle);
 }
 
 static int parse_sub_section(rlm_rest_t *inst, CONF_SECTION *parent, CONF_PARSER const *config_items,
@@ -1087,6 +1076,77 @@ static int parse_sub_section(rlm_rest_t *inst, CONF_SECTION *parent, CONF_PARSER
 	return 0;
 }
 
+static int _mod_conn_free(fr_curl_io_request_t *randle)
+{
+	curl_easy_cleanup(randle->candle);
+	return 0;
+}
+
+/** Cleans up after a REST request.
+ *
+ * Resets all options associated with a CURL handle, and frees any headers
+ * associated with it.
+ *
+ * Calls rest_read_ctx_free and rest_response_free to free any memory used by
+ * context data.
+ *
+ * @param[in] randle to cleanup.
+ * @param[in] uctx unused.
+ */
+static int rest_request_cleanup(fr_curl_io_request_t *randle, UNUSED void *uctx)
+{
+	rlm_rest_curl_context_t *ctx = talloc_get_type_abort(randle->uctx, rlm_rest_curl_context_t);
+	CURL			*candle = randle->candle;
+
+	/*
+	 *  Clear any previously configured options
+	 */
+	curl_easy_reset(candle);
+
+	/*
+	 *  Free header list
+	 */
+	if (ctx->headers != NULL) {
+		curl_slist_free_all(ctx->headers);
+		ctx->headers = NULL;
+	}
+
+	/*
+	 *  Free response data
+	 */
+	TALLOC_FREE(ctx->body);
+	TALLOC_FREE(ctx->response.buffer);
+	TALLOC_FREE(ctx->request.encoder);
+	TALLOC_FREE(ctx->response.decoder);
+
+	randle->request = NULL;
+	return 0;
+}
+
+static int rest_conn_alloc(fr_curl_io_request_t *randle, void *uctx)
+{
+	rlm_rest_t const	*inst = talloc_get_type_abort(uctx, rlm_rest_t);
+	rlm_rest_curl_context_t	*curl_ctx = NULL;
+
+	randle->candle = curl_easy_init();
+	if (unlikely(!randle->candle)) {
+		fr_strerror_printf("Unable to initialise CURL handle");
+		return -1;
+	}
+
+	MEM(curl_ctx = talloc_zero(randle, rlm_rest_curl_context_t));
+	curl_ctx->headers = NULL;
+	curl_ctx->request.instance = inst;
+	curl_ctx->response.instance = inst;
+
+	randle->uctx = curl_ctx;
+	talloc_set_destructor(randle, _mod_conn_free);
+
+	rest_slab_element_set_destructor(randle, rest_request_cleanup, NULL);
+
+	return 0;
+}
+
 /** Create a thread specific multihandle
  *
  * Easy handles representing requests are added to the curl multihandle
@@ -1101,31 +1161,13 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
 	rlm_rest_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_rest_t);
 	rlm_rest_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
-	CONF_SECTION		*conf = mctx->inst->conf;
 	fr_curl_handle_t	*mhandle;
-	CONF_SECTION		*my_conf = NULL, *pool;
 
 	t->inst = inst;
 
-	/*
-	 *	Temporary hack to make config parsing
-	 *	thread safe.
-	 */
-	if ((pool = cf_section_find(conf, "pool", NULL))) {
-		my_conf = cf_section_dup(NULL, NULL, pool, cf_section_name1(pool), cf_section_name2(pool), true);
-	} else {
-		my_conf = cf_section_alloc(NULL, NULL, "pool", NULL);
-	}
-	t->pool = fr_pool_init(NULL, my_conf, inst, rest_mod_conn_create, NULL, mctx->inst->name);
-	talloc_free(my_conf);
-
-	if (!t->pool) {
-		ERROR("Pool instantiation failed");
-		return -1;
-	}
-
-	if (fr_pool_start(t->pool) < 0) {
-		ERROR("Starting initial connections failed");
+	if (!(t->slab = rest_slab_list_alloc(t, mctx->el, &inst->conn_config.reuse,
+					     rest_conn_alloc, NULL, inst, false, false))) {
+		ERROR("Connection handle pool instantiation failed");
 		return -1;
 	}
 
@@ -1150,7 +1192,7 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
 	rlm_rest_thread_t *t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 
 	talloc_free(t->mhandle);	/* Ensure this is shutdown before the pool */
-	fr_pool_free(t->pool);
+	talloc_free(t->slab);
 
 	return 0;
 }
@@ -1192,6 +1234,9 @@ static int instantiate(module_inst_ctx_t const *mctx)
 		return -1;
 	}
 
+	inst->conn_config.reuse.num_children = 1;
+	inst->conn_config.reuse.child_pool_size = sizeof(rlm_rest_curl_context_t);
+
 	return 0;
 }
 
@@ -1200,8 +1245,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	rlm_rest_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_rest_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, rest_xlat, FR_TYPE_STRING, 0);
-	xlat_func_args(xlat, rest_xlat_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, rest_xlat, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, rest_xlat_args);
 
 	return 0;
 }

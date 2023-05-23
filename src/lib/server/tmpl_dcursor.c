@@ -18,7 +18,7 @@
  * $Id$
  *
  * @brief #fr_pair_t template functions
- * @file src/lib/server/tmpl_cursor.c
+ * @file src/lib/server/tmpl_dcursor.c
  *
  * @ingroup AVP
  *
@@ -47,7 +47,7 @@ void _tmpl_cursor_pool_init(tmpl_dcursor_ctx_t *cc)
  *
  * @param[in] list	being traversed.
  * @param[in] curr	item in the list to start tests from.
- * @param[in] uctx	Context for evaluation - in this instance a #tmpl_nested_dcursor_t
+ * @param[in] uctx	Context for evaluation - in this instance a #tmpl_dcursor_nested_t
  * @return
  *	- the next matching attribute
  *	- NULL if none found
@@ -56,11 +56,6 @@ static void *_tmpl_cursor_child_next(fr_dlist_head_t *list, void *curr, void *uc
 {
 	tmpl_dcursor_nested_t	*ns = uctx;
 	fr_pair_t		*vp = curr;
-
-	/*
-	 *	Only applies to TMPL_TYPE_LIST - remove when that is gone.
-	 */
-	if ((!ns->ar) || (!ns->ar->ar_da)) return fr_dlist_next(list, curr);
 
 	while ((vp = fr_dlist_next(list, vp))) {
 		if (fr_dict_attr_cmp(ns->ar->ar_da, vp->da) == 0) break;
@@ -104,7 +99,7 @@ void _tmpl_cursor_pair_init(TALLOC_CTX *list_ctx, fr_pair_list_t *list, tmpl_att
 	/*
 	 *	Iterates over attributes of a specific type
 	 */
-	if (tmpl_is_list(cc->vpt) || ar_is_normal(ar)) {
+	if (ar_is_normal(ar)) {
 		fr_pair_dcursor_iter_init(&ns->cursor, list, _tmpl_cursor_child_next, ns);
 	/*
 	 *	Iterates over all attributes at this level
@@ -177,7 +172,7 @@ fr_pair_t *_tmpl_cursor_eval(fr_pair_t *curr, tmpl_dcursor_ctx_t *cc)
 		pop = true;
 	}
 		break;
-	} else goto all_inst;	/* Used for TMPL_TYPE_LIST */
+	} else goto all_inst;
 
 	/*
 	 *	If no pair was found and there is a fill
@@ -239,21 +234,8 @@ static void *_tmpl_cursor_next(UNUSED fr_dlist_head_t *list, void *curr, void *u
 			return vp;
 		}
 
-	null_result:
 		return NULL;
 	}
-
-	/*
-	 *	Hacks for evaluating lists
-	 *	Hopefully this tmpl type goes away soon...
-	 */
-	case TMPL_TYPE_LIST:
-		if (!fr_dlist_tail(&cc->nested)) goto null_result;	/* end of list */
-
-		vp = _tmpl_cursor_eval(curr, cc);
-		if (!vp) goto null_result;
-
-		return vp;
 
 	default:
 		fr_assert(0);
@@ -314,6 +296,8 @@ static int tmpl_dcursor_remove(UNUSED fr_dlist_head_t *list, void *to_remove, vo
  * @param[in] list		a nested list to start evaluating from.
  *				May be the child list of a pair in the request's pair tree.
  * @param[in] vpt		specifying the #fr_pair_t type or list to iterate over.
+ * @param[in] build		Callback to build missing pairs.
+ * @param[in] uctx		to pass to build.
  * @return
  *	- First #fr_pair_t specified by the #tmpl_t.
  *	- NULL if no matching #fr_pair_t found, and NULL on error.
@@ -347,7 +331,6 @@ fr_pair_t *tmpl_dcursor_init_relative(int *err, TALLOC_CTX *ctx, tmpl_dcursor_ct
 	 */
 	switch (vpt->type) {
 	case TMPL_TYPE_ATTR:
-	case TMPL_TYPE_LIST:
 		_tmpl_cursor_pair_init(list, cc->list, tmpl_attr_list_head(&vpt->data.attribute.ar), cc);
 		break;
 
@@ -411,7 +394,7 @@ fr_pair_t *_tmpl_dcursor_init(int *err, TALLOC_CTX *ctx, tmpl_dcursor_ctx_t *cc,
 {
 	fr_pair_t		*list;
 
-	fr_assert(tmpl_is_attr(vpt) || tmpl_is_list(vpt));
+	fr_assert(tmpl_is_attr(vpt));
 
 	if (err) *err = 0;
 
@@ -420,25 +403,10 @@ fr_pair_t *_tmpl_dcursor_init(int *err, TALLOC_CTX *ctx, tmpl_dcursor_ctx_t *cc,
 	 */
 	if (tmpl_request_ptr(&request, tmpl_request(vpt)) < 0) {
 		if (err) *err = -3;
-	error:
 		memset(cc, 0, sizeof(*cc));	/* so tmpl_dcursor_clear doesn't explode */
 		return NULL;
 	}
-
-	/*
-	 *	Get the right list in the specified context
-	 */
-	if (!vpt->rules.attr.list_as_attr) {
-		list = tmpl_get_list(request, vpt);
-		if (!list) {
-			fr_strerror_printf("List \"%s\" not available in this context",
-					   fr_table_str_by_value(pair_list_table, tmpl_list(vpt), "<INVALID>"));
-			if (err) *err = -2;
-			goto error;
-		}
-	} else {
-		list = request->pair_root;
-	}
+	list = request->pair_root;
 
 	return tmpl_dcursor_init_relative(err, ctx, cc, cursor, request, list, vpt, build, uctx);
 }
@@ -536,37 +504,15 @@ int tmpl_extents_find(TALLOC_CTX *ctx,
 
 	TMPL_VERIFY(vpt);
 
-	fr_assert(tmpl_is_attr(vpt) || tmpl_is_list(vpt));
+	fr_assert(tmpl_is_attr(vpt));
 
 	/*
 	 *	Navigate to the correct request context
 	 */
 	if (tmpl_request_ptr(&request, tmpl_request(vpt)) < 0) return -3;
 
-	if (!vpt->rules.attr.list_as_attr) {
-		/*
-		 *	Get the right list in the specified context
-		 */
-		list_head = tmpl_list_head(request, tmpl_list(vpt));
-		if (!list_head) {
-			fr_strerror_printf("List \"%s\" not available in this context",
-					   fr_table_str_by_value(pair_list_table, tmpl_list(vpt), "<INVALID>"));
-			return -2;
-		}
-		list_ctx = tmpl_list_ctx(request, tmpl_list(vpt));
-	} else {
-		list_head = &request->pair_root->vp_group;
-		list_ctx = request->pair_root;
-	}
-
-	/*
-	 *	If it's a list, just return the list head
-	 */
-	if (vpt->type == TMPL_TYPE_LIST) {
-	do_list:
-		if (existing) EXTENT_ADD(existing, NULL, list_ctx, list_head);
-		return 0;
-	}
+	list_head = &request->pair_root->vp_group;
+	list_ctx = request->pair_root;
 
 	/*
 	 *	If it's a leaf skip all the expensive
@@ -583,7 +529,8 @@ int tmpl_extents_find(TALLOC_CTX *ctx,
 		break;
 
 	default:
-		goto do_list;
+		if (existing) EXTENT_ADD(existing, NULL, list_ctx, list_head);
+		return 0;
 	}
 
 	/*

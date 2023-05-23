@@ -40,25 +40,19 @@ typedef struct {
 	int				sockfd;
 
 	fr_io_address_t			*connection;		//!< for connected sockets.
-	fr_hash_table_t			*sessions;		//!< hash of states for multiple rounds
 
 	fr_stats_t			stats;			//!< statistics for this socket
 
 } proto_radius_udp_thread_t;
 
 typedef struct {
-	uint8_t				hdr[RADIUS_HEADER_LENGTH]; //!< MUST be at the start!
-	fr_io_track_t			*parent;		//!< so we can free it
-	fr_hash_table_t			*sessions;		//!< where the State is tracked
-	bool				problematic;		//!< multiple States with the same value
-	size_t				len;
-	uint8_t const  			*state;
-} proto_radius_udp_state_t;
-
-typedef struct {
 	CONF_SECTION			*cs;			//!< our configuration
 
 	fr_ipaddr_t			ipaddr;			//!< IP address to listen on.
+	fr_ipaddr_t			src_ipaddr;		//!< IP to use for responses, which may be
+								///< different from the ipaddr we're listening on
+								///< with L3 load balancing setups.
+	bool				src_ipaddr_is_set;	//!< Use specified a source ip address.
 
 	char const			*interface;		//!< Interface to bind to.
 	char const			*port_name;		//!< Name of the port for getservent().
@@ -75,9 +69,8 @@ typedef struct {
 	bool				send_buff_is_set;	//!< Whether we were provided with a send_buff
 	bool				dynamic_clients;	//!< whether we have dynamic clients
 	bool				dedup_authenticator;	//!< dedup using the request authenticator
-	bool				track_sessions;		//!< track multi-round sessions
 
-	RADCLIENT_LIST			*clients;		//!< local clients
+	fr_client_list_t			*clients;		//!< local clients
 
 	fr_trie_t			*trie;			//!< for parsed networks
 	fr_ipaddr_t			*allow;			//!< allowed networks for dynamic clients
@@ -98,6 +91,8 @@ static const CONF_PARSER udp_listen_config[] = {
 	{ FR_CONF_OFFSET("ipv4addr", FR_TYPE_IPV4_ADDR, proto_radius_udp_t, ipaddr) },
 	{ FR_CONF_OFFSET("ipv6addr", FR_TYPE_IPV6_ADDR, proto_radius_udp_t, ipaddr) },
 
+	{ FR_CONF_OFFSET_IS_SET("src_ipaddr", FR_TYPE_COMBO_IP_ADDR, proto_radius_udp_t, src_ipaddr) },
+
 	{ FR_CONF_OFFSET("interface", FR_TYPE_STRING, proto_radius_udp_t, interface) },
 	{ FR_CONF_OFFSET("port_name", FR_TYPE_STRING, proto_radius_udp_t, port_name) },
 
@@ -105,8 +100,6 @@ static const CONF_PARSER udp_listen_config[] = {
 
 	{ FR_CONF_OFFSET_IS_SET("recv_buff", FR_TYPE_UINT32, proto_radius_udp_t, recv_buff) },
 	{ FR_CONF_OFFSET_IS_SET("send_buff", FR_TYPE_UINT32, proto_radius_udp_t, send_buff) },
-
-	{ FR_CONF_OFFSET("track_sessions", FR_TYPE_BOOL, proto_radius_udp_t, track_sessions) } ,
 
 	{ FR_CONF_OFFSET("accept_conflicting_packets", FR_TYPE_BOOL, proto_radius_udp_t, dedup_authenticator) } ,
 	{ FR_CONF_OFFSET("dynamic_clients", FR_TYPE_BOOL, proto_radius_udp_t, dynamic_clients) } ,
@@ -203,33 +196,6 @@ static ssize_t mod_read(fr_listen_t *li, void **packet_ctx, fr_time_t *recv_time
 	return packet_len;
 }
 
-static int _state_free(proto_radius_udp_state_t *state)
-{
-	fr_assert(state->sessions != NULL);
-
-	(void) fr_hash_table_remove(state->sessions, state);
-	return 0;
-}
-
-/*
- *	Find the State attribute
- */
-static uint8_t const *state_find(uint8_t const *packet, size_t packet_len)
-{
-	uint8_t const *attr, *end;
-
-	attr = packet + RADIUS_HEADER_LENGTH;
-	end = packet + packet_len;
-
-	while (attr < end) {
-		if (attr[0] == FR_STATE) return attr;
-
-		attr += attr[1];
-	}
-
-	return NULL;
-}
-
 static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, UNUSED fr_time_t request_time,
 			 uint8_t *buffer, size_t buffer_len, UNUSED size_t written)
 {
@@ -256,6 +222,12 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, UNUSED fr_time_t req
 	 *	the client, not ourselves.
 	 */
 	fr_socket_addr_swap(&socket, &track->address->socket);
+
+	/*
+	 *	Override the source ip address in the outbound
+	 *	packet.
+	 */
+	if (inst->src_ipaddr_is_set) socket.inet.src_ipaddr = inst->src_ipaddr;
 
 	/*
 	 *	This handles the race condition where we get a DUP,
@@ -303,63 +275,6 @@ static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, UNUSED fr_time_t req
 //		status_check_reply(inst, buffer, buffer_len);
 	}
 
-	/*
-	 *	Root through the reply, looking for State, and add it
-	 *	to our tracking table.
-	 */
-	if (inst->track_sessions) {
-		proto_radius_udp_state_t	*state;
-		uint8_t const			*attr;
-
-		attr = state_find(buffer, buffer_len);
-		if (!attr) return data_size;
-
-		/*
-		 *	Is there already a tracking entry with this &reply.State in it?
-		 */
-		state = fr_hash_table_find(thread->sessions, &(proto_radius_udp_state_t) {
-				.len = attr[1] - 2,
-				.state = attr + 2,
-			});
-
-		/*
-		 *	We don't always control the contents of the
-		 *	State attribute.  Some systems may use the
-		 *	same value of State for every packet in a
-		 *	connection.
-		 *
-		 *	If that happens, then don't do any more
-		 *	tracking, as we don't want to delete our own
-		 *	"track" structure out from under us.  We also
-		 *	don't want to delete an unrelated "track"
-		 *	structure.
-		 *
-		 *	Instead, just mark the state as "problematic",
-		 *	and let it be cleaned up when the dedup frees
-		 *	the tracking structure.
-		 */
-		if (state) {
-			state->problematic = true;
-			return data_size;
-		}
-
-		/*
-		 *	No existing entry matches &reply.State.  We
-		 *	can safely add this entry.
-		 */
-		state = talloc_get_type_abort(track->packet, proto_radius_udp_state_t);
-		fr_assert(state->state == NULL);
-
-		state->len = attr[1] - 2;
-		state->state = talloc_memdup(state, attr + 2, attr[1] - 2);
-		state->sessions = thread->sessions;
-
-		fr_assert(state->state);
-		if (fr_hash_table_insert(thread->sessions, state)) {
-			talloc_set_destructor(state, _state_free);
-		}
-	}
-
 	return data_size;
 }
 
@@ -382,31 +297,6 @@ static void mod_network_get(void *instance, int *ipproto, bool *dynamic_clients,
 	*trie = inst->trie;
 }
 
-static uint32_t session_hash(void const *data)
-{
-	proto_radius_udp_state_t const *state = (proto_radius_udp_state_t const *) data;
-
-	fr_assert(state->state != NULL);
-
-	return fr_hash(state->state, state->len);
-}
-
-static int8_t session_cmp(void const *one, void const *two)
-{
-	proto_radius_udp_state_t const *a = (proto_radius_udp_state_t const *) one;
-	proto_radius_udp_state_t const *b = (proto_radius_udp_state_t const *) two;
-	uint8_t rcode;
-
-	fr_assert(a->state != NULL);
-	fr_assert(b->state != NULL);
-
-	rcode = CMP(a->len, b->len);
-	if (!rcode) return rcode;
-
-	return CMP(memcmp(a->state, b->state, a->len), 0);
-}
-
-
 /** Open a UDP listener for RADIUS
  *
  */
@@ -416,6 +306,7 @@ static int mod_open(fr_listen_t *li)
 	proto_radius_udp_thread_t	*thread = talloc_get_type_abort(li->thread_instance, proto_radius_udp_thread_t);
 
 	int				sockfd;
+	fr_ipaddr_t			ipaddr = inst->ipaddr;
 	uint16_t			port = inst->port;
 
 	li->fd = sockfd = fr_socket_server_udp(&inst->ipaddr, &port, inst->port_name, true);
@@ -462,7 +353,7 @@ static int mod_open(fr_listen_t *li)
 	}
 #endif
 
-	if (fr_socket_bind(sockfd, &inst->ipaddr, &port, inst->interface) < 0) {
+	if (fr_socket_bind(sockfd, inst->interface, &ipaddr, &port) < 0) {
 		close(sockfd);
 		PERROR("Failed binding socket");
 		goto error;
@@ -476,14 +367,6 @@ static int mod_open(fr_listen_t *li)
 					     NULL, 0,
 					     &inst->ipaddr, inst->port,
 					     inst->interface);
-
-	if (inst->track_sessions) {
-		thread->sessions = fr_hash_table_alloc(thread, session_hash, session_cmp, NULL);
-		if (!thread->sessions) {
-			ERROR("Failed to create session tracking table.");
-			return -1;
-		}
-	}
 
 	return 0;
 }
@@ -506,41 +389,13 @@ static int mod_fd_set(fr_listen_t *li, int fd)
 	return 0;
 }
 
-static void *mod_track_create(void const *instance, void *thread_instance, UNUSED RADCLIENT *client,
-			      fr_io_track_t *track, uint8_t const *packet, size_t packet_len)
+static void *mod_track_create(UNUSED void const *instance, UNUSED void *thread_instance, UNUSED fr_client_t *client,
+			      fr_io_track_t *track, uint8_t const *packet, UNUSED size_t packet_len)
 {
-	proto_radius_udp_t const *inst = talloc_get_type_abort_const(instance, proto_radius_udp_t);
-	proto_radius_udp_thread_t *thread = talloc_get_type_abort(thread_instance, proto_radius_udp_thread_t);
-	proto_radius_udp_state_t *state;
-	uint8_t const *attr;
-
-	if (!inst->track_sessions) {
-		return talloc_memdup(track, packet, RADIUS_HEADER_LENGTH);
-	}
-
-	/*
-	 *	Find the tracking entry for the previous reply, and
-	 *	delete it.
-	 */
-	attr = state_find(packet, packet_len);
-	if (attr) {
-		state = fr_hash_table_find(thread->sessions, &(proto_radius_udp_state_t) {
-				.len = attr[1] - 2,
-				.state = attr + 2,
-			});
-		if (state && !state->problematic) talloc_free(state->parent);
-	}
-
-	state = talloc_zero(track, proto_radius_udp_state_t);
-	if (!state) return NULL;
-
-	state->parent = track;
-	memcpy(state->hdr, packet, RADIUS_HEADER_LENGTH);
-
-	return state;
+	return talloc_memdup(track, packet, RADIUS_HEADER_LENGTH);
 }
 
-static int mod_track_compare(void const *instance, UNUSED void *thread_instance, RADCLIENT *client,
+static int mod_track_compare(void const *instance, UNUSED void *thread_instance, fr_client_t *client,
 			     void const *one, void const *two)
 {
 	int ret;
@@ -669,10 +524,10 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	return 0;
 }
 
-static RADCLIENT *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
+static fr_client_t *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
 {
 	proto_radius_udp_t const       	*inst = talloc_get_type_abort_const(li->app_io_instance, proto_radius_udp_t);
-	RADCLIENT		*client;
+	fr_client_t		*client;
 
 	/*
 	 *	Prefer local clients.

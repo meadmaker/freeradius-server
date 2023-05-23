@@ -364,16 +364,16 @@ int mod_attribute_to_element(const char *name, json_object *map, void *buf)
  * @param[in] out	Cursor to append maps to.
  * @param[in] request	The request to which the generated pairs should be added.
  * @param[in] json	The JSON object representation of the user document.
- * @param[in] list	The pair list PAIR_LIST_CONTROL or PAIR_LIST_REPLY.
+ * @param[in] list	The pair list fr_request_attr_control or fr_request_attr_reply
  * @return
  *	- 1 if no section found.
  *	- 0 on success.
  *	- <0 on error.
  */
-int mod_json_object_to_map(TALLOC_CTX *ctx, fr_dcursor_t *out, request_t *request, json_object *json, tmpl_pair_list_t list)
+int mod_json_object_to_map(TALLOC_CTX *ctx, fr_dcursor_t *out, request_t *request, json_object *json, fr_dict_attr_t const *list)
 {
 	json_object	*list_obj;
-	char const	*list_name = fr_table_str_by_value(pair_list_table, list, "<INVALID>");
+	char const	*list_name = list->name;
 
 	/*
 	 *	Check for a section matching the specified list
@@ -716,7 +716,7 @@ int mod_load_client_documents(rlm_couchbase_t *inst, CONF_SECTION *tmpl, CONF_SE
 	json_object *json, *j_value;                                /* json object holders */
 	json_object *jrows = NULL;                               /* json object to hold view rows */
 	CONF_SECTION *client;                                    /* freeradius config list */
-	RADCLIENT *c;                                            /* freeradius client */
+	fr_client_t *c;                                            /* freeradius client */
 
 	/* get handle */
 	handle = fr_pool_connection_get(inst->pool, NULL);
@@ -867,7 +867,7 @@ int mod_load_client_documents(rlm_couchbase_t *inst, CONF_SECTION *tmpl, CONF_SE
 		/*
 		 * @todo These should be parented from something.
 		 */
-		c = client_afrom_cs(NULL, client, false);
+		c = client_afrom_cs(NULL, client, false, 0);
 		if (!c) {
 			ERROR("failed to allocate client");
 			/* free config setion */

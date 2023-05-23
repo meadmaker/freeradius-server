@@ -36,6 +36,10 @@ typedef struct {
 	unlang_t			self;			//!< Common fields in all #unlang_t tree nodes.
 	module_instance_t		*instance;		//!< Global instance of the module we're calling.
 	module_method_t			method;			//!< The entry point into the module.
+	call_method_env_t const		*method_env;		//!< Call environment for this method.
+	call_env_parsed_head_t		call_env_parsed;	//!< The per call parsed call environment.
+	TALLOC_CTX			*call_env_ctx;		//!< A talloc pooled object for parsed call env
+								///< to be allocated from.
 } unlang_module_t;
 
 /** A module stack entry
@@ -49,6 +53,8 @@ typedef struct {
 								///< structure because the #unlang_t tree is
 								///< shared between all threads, so we can't
 								///< cache thread-specific data in the #unlang_t.
+
+	void				*env_data;		//!< Expanded per call "call environment" tmpls.
 
 #ifndef NDEBUG
 	int				unlang_indent;		//!< Record what this was when we entered the module.
@@ -67,8 +73,9 @@ typedef struct {
 	 * @{
  	 */
 	void				*rctx;			//!< for resume / signal
-	unlang_module_resume_t		resume;			//!< resumption handler
+	module_method_t			resume;			//!< resumption handler
 	unlang_module_signal_t		signal;			//!< for signal handlers
+	fr_signal_t			sigmask;		//!< Signals to block.
 
 	/** @} */
 

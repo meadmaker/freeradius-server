@@ -78,7 +78,7 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 	 *	Decode structs with length prefixes.
 	 */
 	if (da_is_length_field(parent)) {
-		size_t struct_len, need;
+		size_t struct_len, need, new_len;
 
 		if (parent->flags.subtype == FLAG_LENGTH_UINT8) {
 			need = 1;
@@ -97,8 +97,15 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 			struct_len |= p[1];
 		}
 
-		if ((p + struct_len + need) > end) {
-			FR_PROTO_TRACE("Length header is larger than remaining data");
+		if (struct_len < da_length_offset(parent)) {
+			FR_PROTO_TRACE("Length header (%zu) is smaller than minimum value (%u)",
+				       struct_len, parent->flags.type_size);
+			goto unknown;
+		}
+
+		if ((p + struct_len + need - da_length_offset(parent)) > end) {
+			FR_PROTO_TRACE("Length header (%zu) is larger than remaining data (%zu)",
+				       struct_len + need, (end - p));
 			goto unknown;
 		}
 
@@ -108,9 +115,16 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 		 */
 		p += need;
 		end = p + struct_len;
-		data_len = struct_len + need;
+		new_len = struct_len + need - offset;
+		if (new_len > data_len) goto unknown;
+
+		data_len = new_len;
 	}
 
+	/*
+	 *	@todo - If the struct is truncated on a MEMBER boundary, we silently omit
+	 *	the trailing members.  Maybe this should be an error?
+	 */
 	while (p < end) {
 		size_t child_length;
 
@@ -228,7 +242,12 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 		 *	The child is variable sized, OR it's an array.
 		 *	Eat up the rest of the data.
 		 */
-		if (!child_length || (child->flags.array)) child_length = (end - p);
+		if (!child_length || (child->flags.array)) {
+			child_length = (end - p);
+
+		} else if ((size_t) (end - p) < child_length) {
+			goto unknown;
+		}
 
 		/*
 		 *	Magic values get the callback called.
@@ -287,7 +306,7 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 		 */
 		if (fr_value_box_from_network(vp, &vp->data, vp->da->type, vp->da,
 					      &FR_DBUFF_TMP(p, child_length), child_length, true) < 0) {
-			FR_PROTO_TRACE("fr_struct_from_network - failed decoding child VP");
+			FR_PROTO_TRACE("fr_struct_from_network - failed decoding child VP %s", vp->da->name);
 			talloc_free(vp);
 		unknown:
 			if (nested) {
@@ -348,13 +367,13 @@ ssize_t fr_struct_from_network(TALLOC_CTX *ctx, fr_pair_list_t *out,
 			 */
 			child = fr_dict_unknown_attr_afrom_num(child_ctx, key_vp->da, 0);
 			if (!child) {
-				FR_PROTO_TRACE("failed allocating unknown child?");
+				FR_PROTO_TRACE("failed allocating unknown child for key VP %s", key_vp->da->name);
 				goto unknown;
 			}
 
 			slen = fr_pair_raw_from_network(child_ctx, child_list, child, p, end - p);
 			if (slen < 0) {
-				FR_PROTO_TRACE("Failed creating raw VP from malformed or unknown substruct");
+				FR_PROTO_TRACE("Failed creating raw VP from malformed or unknown substruct for child %s", child->name);
 				fr_dict_unknown_free(&child);
 				return slen;
 			}
@@ -458,7 +477,7 @@ static void *struct_next_encodable(fr_dlist_head_t *list, void *current, void *u
 ssize_t fr_struct_to_network(fr_dbuff_t *dbuff,
 			     fr_da_stack_t *da_stack, unsigned int depth,
 			     fr_dcursor_t *parent_cursor, void *encode_ctx,
-			     fr_encode_dbuff_t encode_value, fr_encode_dbuff_t encode_tlv)
+			     fr_encode_dbuff_t encode_value, fr_encode_dbuff_t encode_cursor)
 {
 	fr_dbuff_t		work_dbuff;
 	fr_dbuff_marker_t	hdr;
@@ -738,7 +757,7 @@ ssize_t fr_struct_to_network(fr_dbuff_t *dbuff,
 			fr_proto_da_stack_build(da_stack, vp->da);
 
 			len = fr_struct_to_network(&work_dbuff, da_stack, depth + 2, /* note + 2 !!! */
-						   cursor, encode_ctx, encode_value, encode_tlv);
+						   cursor, encode_ctx, encode_value, encode_cursor);
 			if (len < 0) return len;
 			goto done;
 		}
@@ -756,7 +775,7 @@ ssize_t fr_struct_to_network(fr_dbuff_t *dbuff,
 			fr_proto_da_stack_build(da_stack, vp->da->parent);
 
 			len = fr_struct_to_network(&work_dbuff, da_stack, depth + 2, /* note + 2 !!! */
-						   cursor, encode_ctx, encode_value, encode_tlv);
+						   cursor, encode_ctx, encode_value, encode_cursor);
 			if (len < 0) return len;
 			goto done;
 		}
@@ -781,8 +800,8 @@ done:
 	if (tlv) {
 		ssize_t slen;
 
-		if (!encode_tlv) {
-			fr_strerror_printf("Asked to encode TLV %s, but not passed an encoding function",
+		if (!encode_cursor) {
+			fr_strerror_printf("Asked to encode child attribute %s, but we were not passed an encoding function",
 					   tlv->name);
 			return -1;
 		}
@@ -793,7 +812,7 @@ done:
 		 *	Encode any TLV attributes which are part of this structure.
 		 */
 		while (vp && (da_stack->da[depth] == parent) && (da_stack->depth >= parent->depth)) {
-			slen = encode_tlv(&work_dbuff, da_stack, depth + 1, cursor, encode_ctx);
+			slen = encode_cursor(&work_dbuff, da_stack, depth + 1, cursor, encode_ctx);
 			if (slen < 0) return slen;
 
 			vp = fr_dcursor_current(cursor);
@@ -802,10 +821,24 @@ done:
 	}
 
 	if (do_length) {
+		size_t length = fr_dbuff_used(&work_dbuff);
+
 		if (parent->flags.subtype == FLAG_LENGTH_UINT8) {
-			(void) fr_dbuff_in(&hdr, (uint8_t) (fr_dbuff_used(&work_dbuff) - 1));
+			length -= 1;
+
+			length += da_length_offset(parent);
+
+			if (length > UINT8_MAX) return -1;
+
+			(void) fr_dbuff_in(&hdr, (uint8_t) length);
 		} else {
-			(void) fr_dbuff_in(&hdr, (uint16_t) (fr_dbuff_used(&work_dbuff) - 2));
+			length -= 2;
+
+			length += da_length_offset(parent);
+
+			if (length > UINT16_MAX) return -1;
+
+			(void) fr_dbuff_in(&hdr, (uint16_t) length);
 		}
 	}
 

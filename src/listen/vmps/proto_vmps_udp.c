@@ -68,7 +68,7 @@ typedef struct {
 	fr_ipaddr_t			*allow;			//!< allowed networks for dynamic clients
 	fr_ipaddr_t			*deny;			//!< denied networks for dynamic clients
 
-	RADCLIENT_LIST			*clients;		//!< local clients
+	fr_client_list_t			*clients;		//!< local clients
 } proto_vmps_udp_t;
 
 
@@ -285,6 +285,7 @@ static int mod_open(fr_listen_t *li)
 	proto_vmps_udp_thread_t		*thread = talloc_get_type_abort(li->thread_instance, proto_vmps_udp_thread_t);
 
 	int				sockfd;
+	fr_ipaddr_t			ipaddr = inst->ipaddr;
 	uint16_t			port = inst->port;
 
 	li->fd = sockfd = fr_socket_server_udp(&inst->ipaddr, &port, inst->port_name, true);
@@ -309,7 +310,7 @@ static int mod_open(fr_listen_t *li)
 		}
 	}
 
-	if (fr_socket_bind(sockfd, &inst->ipaddr, &port, inst->interface) < 0) {
+	if (fr_socket_bind(sockfd, inst->interface, &ipaddr, &port) < 0) {
 		close(sockfd);
 		PERROR("Failed binding socket");
 		goto error;
@@ -345,7 +346,7 @@ static int mod_fd_set(fr_listen_t *li, int fd)
 	return 0;
 }
 
-static void *mod_track_create(UNUSED void const *instance, UNUSED void *thread_instance, UNUSED RADCLIENT *client,
+static void *mod_track_create(UNUSED void const *instance, UNUSED void *thread_instance, UNUSED fr_client_t *client,
 			      fr_io_track_t *track, uint8_t const *buffer, size_t buffer_len)
 {
 	proto_vmps_track_t  *t;
@@ -368,7 +369,7 @@ static void *mod_track_create(UNUSED void const *instance, UNUSED void *thread_i
 	return t;
 }
 
-static int mod_track_compare(UNUSED void const *instance, UNUSED void *thread_instance, UNUSED RADCLIENT *client,
+static int mod_track_compare(UNUSED void const *instance, UNUSED void *thread_instance, UNUSED fr_client_t *client,
 			     void const *one, void const *two)
 {
 	proto_vmps_track_t const *a = talloc_get_type_abort_const(one, proto_vmps_track_t);
@@ -479,10 +480,10 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 // @todo - allow for "wildcard" clients, which allow anything
 // and then rely on "networks" to filter source IPs...
 // which means we probably want to filter on "networks" even if there are no dynamic clients
-static RADCLIENT *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
+static fr_client_t *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
 {
 	proto_vmps_udp_t const	*inst = talloc_get_type_abort_const(li->app_io_instance, proto_vmps_udp_t);
-	RADCLIENT		*client;
+	fr_client_t		*client;
 
 	/*
 	 *	Prefer local clients.

@@ -28,7 +28,7 @@ RCSIDH(rest_h, "$Id$")
 #include <freeradius-devel/curl/base.h>
 #include <freeradius-devel/curl/config.h>
 #include <freeradius-devel/server/pairmove.h>
-#include <freeradius-devel/server/pool.h>
+#include <freeradius-devel/util/slab.h>
 
 /*
  *	The common JSON library (also tells us if we have json-c)
@@ -155,7 +155,7 @@ typedef struct {
 	bool			multiplex;	//!< Whether to perform multiple requests using a single
 						///< connection.
 
-	fr_pool_t		*pool;		//!< Pointer to the connection pool.
+	fr_curl_conn_config_t	conn_config;	//!< Configuration of slab allocated connection handles.
 
 	rlm_rest_section_t	xlat;		//!< Configuration specific to xlat.
 	rlm_rest_section_t	authorize;	//!< Configuration specific to authorisation.
@@ -169,12 +169,15 @@ typedef struct {
 #endif
 } rlm_rest_t;
 
+FR_SLAB_TYPES(rest, fr_curl_io_request_t)
+FR_SLAB_FUNCS(rest, fr_curl_io_request_t)
+
 /** Thread specific rlm_rest instance data
  *
  */
 typedef struct {
 	rlm_rest_t const	*inst;		//!< Instance of rlm_rest.
-	fr_pool_t		*pool;		//!< Thread specific connection pool.
+	rest_slab_list_t	*slab;		//!< Slab list for connection handles.
 	fr_curl_handle_t	*mhandle;	//!< Thread specific multi handle.  Serves as the dispatch
 						//!< and coralling structure for REST requests.
 } rlm_rest_thread_t;
@@ -206,7 +209,7 @@ typedef struct {
 	rlm_rest_t const	*instance;	//!< This instance of rlm_rest.
 	rlm_rest_section_t const *section;	//!< Section configuration.
 
-	request_t			*request;	//!< Current request.
+	request_t		*request;	//!< Current request.
 	read_state_t		state;		//!< Encoder state
 
 	fr_dcursor_t		cursor;		//!< Cursor pointing to the start of the list to encode.
@@ -224,7 +227,7 @@ typedef struct {
 	rlm_rest_t const	*instance;	//!< This instance of rlm_rest.
 	rlm_rest_section_t const *section;	//!< Section configuration.
 
-	request_t			*request;	//!< Current request.
+	request_t		*request;	//!< Current request.
 	write_state_t		state;		//!< Decoder state.
 
 	char 			*buffer;	//!< Raw incoming HTTP data.
@@ -292,8 +295,6 @@ int rest_response_decode(rlm_rest_t const *instance,
 void rest_response_error(request_t *request, fr_curl_io_request_t *handle);
 void rest_response_debug(request_t *request, fr_curl_io_request_t *handle);
 
-void rest_request_cleanup(rlm_rest_t const *instance, fr_curl_io_request_t *randle);
-
 #define rest_get_handle_code(_handle)(((rlm_rest_curl_context_t*)((fr_curl_io_request_t*)(_handle))->uctx)->response.code)
 
 #define rest_get_handle_type(_handle)(((rlm_rest_curl_context_t*)((fr_curl_io_request_t*)(_handle))->uctx)->response.type)
@@ -311,5 +312,5 @@ ssize_t rest_uri_host_unescape(char **out, UNUSED rlm_rest_t const *mod_inst, re
 /*
  *	Async IO helpers
  */
-void rest_io_module_signal(module_ctx_t const *mctx, request_t *request, fr_state_signal_t action);
-void rest_io_xlat_signal(xlat_ctx_t const *xctx, request_t *request, fr_state_signal_t action);
+void rest_io_module_signal(module_ctx_t const *mctx, request_t *request, fr_signal_t action);
+void rest_io_xlat_signal(xlat_ctx_t const *xctx, request_t *request, fr_signal_t action);

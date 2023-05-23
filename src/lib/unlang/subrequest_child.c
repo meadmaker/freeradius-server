@@ -56,21 +56,7 @@ static void unlang_detached_max_request_time(UNUSED fr_event_list_t *el, UNUSED 
 
 	RDEBUG("Reached Request-Lifetime.  Forcibly stopping request");
 
-	fr_assert(!request->parent);	/* must be detached */
-
-	/*
-	 *	The request is scheduled and isn't running.  Remove it
-	 *	from the backlog.
-	 */
-	if (unlang_request_is_scheduled(request)) {
-		unlang_stack_t		*stack = request->stack;
-		unlang_interpret_t	*intp = stack->intp;
-
-		fr_assert(request_is_internal(request));
-		intp->funcs.done_internal(request, stack->result, intp->uctx);	/* Should free the request */
-	} else {
-		talloc_free(request);
-	}
+	unlang_interpret_signal(request, FR_SIGNAL_CANCEL);	/* Request should now be freed */
 }
 
 /** Initialize a detached child
@@ -123,39 +109,54 @@ int unlang_subrequest_lifetime_set(request_t *request)
  * This processes any detach signals the child receives
  * The child doesn't actually do the detaching
  */
-static void unlang_subrequest_child_signal(request_t *request, fr_state_signal_t action, UNUSED void *uctx)
+static void unlang_subrequest_child_signal(request_t *request, fr_signal_t action, UNUSED void *uctx)
 {
 	unlang_frame_state_subrequest_t	*state;
 
 	/*
-	 *	Ignore signals which aren't detach,
+	 *	We're already detached so we don't
+	 *	need to notify the parent we're
+	 *	waking up, and we don't need to detach
+	 *	again...
+	 */
+	if (!request->parent) return;
+
+	state = talloc_get_type_abort(frame_current(request->parent)->state, unlang_frame_state_subrequest_t);
+
+	/*
+	 *	Ignore signals which aren't detach, and ar
 	 *	and ignore the signal if we have no parent.
 	 */
-	if ((action != FR_SIGNAL_DETACH) || !request->parent) return;
+	switch (action) {
+	case FR_SIGNAL_DETACH:
+		/*
+		 *	Place child's state back inside the parent
+		 */
+		if (state->session.enable) fr_state_store_in_parent(request,
+								    state->session.unique_ptr,
+								    state->session.unique_int);
 
-	state = talloc_get_type_abort(frame_current(request->parent), unlang_frame_state_subrequest_t);
+		if (!fr_cond_assert(unlang_subrequest_lifetime_set(request) == 0)) {
+			REDEBUG("Child could not be detached");
+			return;
+		}
+		FALL_THROUGH;
 
-	/*
-	 *	Place child's state back inside the parent
-	 */
-	if (state->session.enable) fr_state_store_in_parent(request,
-							    state->session.unique_ptr,
-							    state->session.unique_int);
+	case FR_SIGNAL_CANCEL:
+		/*
+		 *	Indicate to the parent there's no longer a child
+		 */
+		state->child = NULL;
 
-	if (!fr_cond_assert(unlang_subrequest_lifetime_set(request) == 0)) {
-		REDEBUG("Child could not be detached");
+		/*
+		 *	Tell the parent to resume
+		 */
+		unlang_interpret_mark_runnable(request->parent);
+		break;
+
+	default:
 		return;
 	}
-
-	/*
-	 *	Indicate to the parent there's no longer a child
-	 */
-	state->child = NULL;
-
-	/*
-	 *	Tell the parent to resume
-	 */
-	unlang_interpret_mark_runnable(request->parent);
 }
 
 /** When the child is done, tell the parent that we've exited.
@@ -205,7 +206,10 @@ int unlang_subrequest_child_push_resume(request_t *child, unlang_frame_state_sub
 	 */
 	if (unlang_function_push(child, NULL,
 				 unlang_subrequest_child_done,
-				 unlang_subrequest_child_signal, UNLANG_TOP_FRAME, state) < 0) return -1;
+				 unlang_subrequest_child_signal,
+				 ~(FR_SIGNAL_DETACH | FR_SIGNAL_CANCEL),
+				 UNLANG_TOP_FRAME,
+				 state) < 0) return -1;
 
 	return_point_set(frame_current(child));	/* Stop return going through the resumption frame */
 

@@ -74,6 +74,8 @@ static void worker_verify(fr_worker_t *worker);
 #define CACHE_LINE_SIZE	64
 static alignas(CACHE_LINE_SIZE) atomic_uint64_t request_number = 0;
 
+static _Thread_local fr_ring_buffer_t *fr_worker_rb;
+
 /**
  *  A worker which takes packets from a master, and processes them.
  */
@@ -100,6 +102,8 @@ struct fr_worker_s {
 	fr_minmax_heap_t	*time_order;	//!< time ordered heap of requests
 	fr_rb_tree_t		*dedup;		//!< de-dup tree
 
+	fr_rb_tree_t		*listeners;    	//!< so we can cancel requests when a listener goes away
+
 	fr_io_stats_t		stats;		//!< input / output stats
 	fr_time_elapsed_t	cpu_time;	//!< histogram of total CPU time per request
 	fr_time_elapsed_t	wall_clock;	//!< histogram of wall clock time per request
@@ -119,6 +123,63 @@ struct fr_worker_s {
 
 	fr_channel_t		**channel;	//!< list of channels
 };
+
+typedef struct {
+	fr_listen_t const	*listener;	//!< incoming packets
+
+	fr_rb_node_t		node;		//!< in tree of listeners
+
+	/*
+	 *	To save time, we don't care about num_elements here.  Which means that we don't
+	 *	need to cache or lookup the fr_worker_listen_t when we free a request.
+	 */
+	fr_dlist_head_t		dlist;		//!< of requests associated with this listener.
+} fr_worker_listen_t;
+
+
+static int8_t worker_listener_cmp(void const *one, void const *two)
+{
+	fr_worker_listen_t const *a = one, *b = two;
+
+	return CMP(a->listener, b->listener);
+}
+
+
+/*
+ *	Explicitly cleanup the memory allocated to the ring buffer,
+ *	just in case valgrind complains about it.
+ */
+static int _fr_worker_rb_free(void *arg)
+{
+	return talloc_free(arg);
+}
+
+/** Initialise thread local storage
+ *
+ * @return fr_ring_buffer_t for messages
+ */
+static inline fr_ring_buffer_t *fr_worker_rb_init(void)
+{
+	fr_ring_buffer_t *rb;
+
+	rb = fr_worker_rb;
+	if (rb) return rb;
+
+	rb = fr_ring_buffer_create(NULL, FR_CONTROL_MAX_MESSAGES * FR_CONTROL_MAX_SIZE);
+	if (!rb) {
+		fr_perror("Failed allocating memory for worker ring buffer");
+		return NULL;
+	}
+
+	fr_atexit_thread_local(fr_worker_rb, _fr_worker_rb_free, rb);
+
+	return rb;
+}
+
+static inline bool is_worker_thread(fr_worker_t const *worker)
+{
+	return (pthread_equal(pthread_self(), worker->thread_id) != 0);
+}
 
 static void worker_request_bootstrap(fr_worker_t *worker, fr_channel_data_t *cd, fr_time_t now);
 static void worker_send_reply(fr_worker_t *worker, request_t *request, bool do_not_respond, fr_time_t now);
@@ -270,6 +331,44 @@ static void worker_channel_callback(void *ctx, void const *data, size_t data_siz
 	}
 }
 
+static int fr_worker_listen_cancel_self(fr_worker_t *worker, fr_listen_t const *li)
+{
+	fr_worker_listen_t *wl;
+	request_t *request;
+
+	wl = fr_rb_find(worker->listeners, &(fr_worker_listen_t) { .listener = li });
+	if (!wl) return -1;
+
+	while ((request = fr_dlist_pop_head(&wl->dlist)) != NULL) {
+		RDEBUG("Canceling request due to socket being closed");
+		unlang_interpret_signal(request, FR_SIGNAL_CANCEL);
+	}
+
+	(void) fr_rb_delete(worker->listeners, wl);
+	talloc_free(wl);
+
+	return 0;
+}
+
+
+/** A socket is going away, so clean up any requests which use this socket.
+ *
+ * @param[in] ctx	the worker
+ * @param[in] data	the message
+ * @param[in] data_size	size of the data
+ * @param[in] now	the current time
+ */
+static void worker_listen_cancel_callback(void *ctx, void const *data, NDEBUG_UNUSED size_t data_size, UNUSED fr_time_t now)
+{
+	fr_listen_t const	*li;
+	fr_worker_t		*worker = ctx;
+
+	fr_assert(data_size == sizeof(li));
+
+	memcpy(&li, data, sizeof(li));
+
+	(void) fr_worker_listen_cancel_self(worker, li);
+}
 
 /** Send a NAK to the network thread
  *
@@ -542,19 +641,16 @@ static void worker_send_reply(fr_worker_t *worker, request_t *request, bool send
 		ssize_t slen = 0;
 		fr_listen_t const *listen = request->async->listen;
 
-		if (worker->config.flatten_before_encode) {
-			fr_pair_flatten(request->pair_list.reply);
-
-		} else if (worker->config.unflatten_before_encode) {
+		if (worker->config.unflatten_before_encode) {
 			fr_pair_unflatten(request->pair_list.reply);
 		} /* else noop */
 
-		if (listen->app->encode) {
-			slen = listen->app->encode(listen->app_instance, request,
-						   reply->m.data, reply->m.rb_size);
-		} else if (listen->app_io->encode) {
+		if (listen->app_io->encode) {
 			slen = listen->app_io->encode(listen->app_io_instance, request,
 						      reply->m.data, reply->m.rb_size);
+		} else if (listen->app->encode) {
+			slen = listen->app->encode(listen->app_instance, request,
+						   reply->m.data, reply->m.rb_size);
 		}
 		if (slen < 0) {
 			RPERROR("Failed encoding request");
@@ -610,6 +706,8 @@ static void worker_send_reply(fr_worker_t *worker, request_t *request, bool send
 
 	fr_assert(!fr_minmax_heap_entry_inserted(request->time_order_id));
 	fr_assert(!fr_heap_entry_inserted(request->runnable_id));
+
+	fr_dlist_entry_unlink(&request->listen_entry);
 
 #ifndef NDEBUG
 	request->async->el = NULL;
@@ -825,6 +923,21 @@ nak:
 	}
 
 	worker_request_time_tracking_start(worker, request, now);
+
+	{
+		fr_worker_listen_t *wl;
+
+		wl = fr_rb_find(worker->listeners, &(fr_worker_listen_t) { .listener = listen });
+		if (!wl) {
+			MEM(wl = talloc_zero(worker, fr_worker_listen_t));
+			fr_dlist_init(&wl->dlist, request_t, listen_entry);
+			wl->listener = listen;
+
+			(void) fr_rb_insert(worker->listeners, wl);
+		}
+
+		fr_dlist_insert_tail(&wl->dlist, request);
+	}
 }
 
 /**
@@ -1272,6 +1385,11 @@ nomem:
 		goto fail;
 	}
 
+	if (fr_control_callback_add(worker->control, FR_CONTROL_ID_LISTEN_DEAD, worker, worker_listen_cancel_callback) < 0) {
+		fr_strerror_const_push("Failed adding callback for listeners");
+		goto fail;
+	}
+
 	worker->runnable = fr_heap_talloc_alloc(worker, worker_runnable_cmp, request_t, runnable_id, 0);
 	if (!worker->runnable) {
 		fr_strerror_const("Failed creating runnable heap");
@@ -1287,6 +1405,12 @@ nomem:
 	worker->dedup = fr_rb_inline_talloc_alloc(worker, request_t, dedup_node, worker_dedup_cmp, NULL);
 	if (!worker->dedup) {
 		fr_strerror_const("Failed creating de_dup tree");
+		goto fail;
+	}
+
+	worker->listeners = fr_rb_inline_talloc_alloc(worker, fr_worker_listen_t, node, worker_listener_cmp, NULL);
+	if (!worker->listeners) {
+		fr_strerror_const("Failed creating listener tree");
 		goto fail;
 	}
 
@@ -1456,6 +1580,23 @@ fr_channel_t *fr_worker_channel_create(fr_worker_t *worker, TALLOC_CTX *ctx, fr_
 	}
 
 	return ch;
+}
+
+int fr_worker_listen_cancel(fr_worker_t *worker, fr_listen_t const *li)
+{
+	fr_ring_buffer_t *rb;
+
+	/*
+	 *	Skip a bunch of work if we're already in the worker thread.
+	 */
+	if (is_worker_thread(worker)) {
+		return fr_worker_listen_cancel_self(worker, li);
+	}
+
+	rb = fr_worker_rb_init();
+	if (!rb) return -1;
+
+	return fr_control_message_send(worker->control, rb, FR_CONTROL_ID_LISTEN, &li, sizeof(li));
 }
 
 #ifdef WITH_VERIFY_PTR

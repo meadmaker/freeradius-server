@@ -30,25 +30,26 @@ RCSID("$Id$")
 #include <freeradius-devel/unlang/xlat_priv.h>
 #include <freeradius-devel/util/calc.h>
 
-static void xlat_value_list_to_xlat(xlat_exp_head_t *head, FR_DLIST_HEAD(fr_value_box_list) *list)
+static void xlat_value_list_to_xlat(xlat_exp_head_t *head, fr_value_box_list_t *list)
 {
 	fr_value_box_t *box;
 	xlat_exp_t *node;
 
 	while ((box = fr_value_box_list_pop_head(list)) != NULL) {
-		MEM(node = xlat_exp_alloc_null(head));
-		node->type = XLAT_BOX;
-
+		MEM(node = xlat_exp_alloc(head, XLAT_BOX, NULL, 0));
 		fr_value_box_copy(node, &node->data, box);
-		talloc_free(box);
 
 		if (node->data.type == FR_TYPE_STRING) {
 			node->quote = T_DOUBLE_QUOTED_STRING;
-			node->fmt = node->data.vb_strvalue;
+			xlat_exp_set_name_buffer_shallow(node, node->data.vb_strvalue);
 		} else {
+			char *name;
+
 			node->quote = T_BARE_WORD;
-			node->fmt = ""; /* @todo - fixme? */
+			MEM(fr_value_box_aprint(node, &name, box, NULL) >= 0);
+			xlat_exp_set_name_buffer_shallow(node, name);
 		}
+		talloc_free(box);
 
 		xlat_exp_insert_tail(head, node);
 	}
@@ -59,8 +60,7 @@ int xlat_purify_list(xlat_exp_head_t *head, request_t *request)
 {
 	int rcode;
 	bool success;
-	xlat_exp_head_t *group;
-	FR_DLIST_HEAD(fr_value_box_list) list;
+	fr_value_box_list_t list;
 	xlat_flags_t our_flags;
 
 	if (!head->flags.can_purify) return 0;
@@ -157,19 +157,13 @@ int xlat_purify_list(xlat_exp_head_t *head, request_t *request)
 			if (!success) return -1;
 
 			/*
-			 *	The function call becomes a GROUP of boxes.  We just re-use the argument head,
-			 *	which is already of the type we need.
+			 *	The function call becomes a GROUP of boxes
 			 */
-			/* coverity[dead_error_begin] */
-			group = node->call.args;
-			fr_dlist_talloc_free(&group->dlist);
-
 			xlat_inst_remove(node);
-			node->type = XLAT_GROUP;
-			node->group = group;
+			xlat_exp_set_type(node, XLAT_GROUP);	/* Frees the argument list */
 
-			xlat_value_list_to_xlat(group, &list);
-			node->flags = group->flags;
+			xlat_value_list_to_xlat(node->group, &list);
+			node->flags = node->group->flags;
 			break;
 		}
 
@@ -305,13 +299,11 @@ static int binary_peephole_optimize(TALLOC_CTX *ctx, xlat_exp_t **out, xlat_exp_
 
 	if (fr_value_calc_binary_op(lhs, &box, FR_TYPE_NULL, lhs_box, op, rhs_box) < 0) return -1;
 
-	MEM(node = xlat_exp_alloc_null(ctx));
-	xlat_exp_set_type(node, XLAT_BOX);
+	MEM(node = xlat_exp_alloc(ctx, XLAT_BOX, NULL, 0));
 
 	if (box.type == FR_TYPE_BOOL) box.enumv = attr_expr_bool_enum;
 
-	(void) fr_value_box_aprint(node, &name, &box, NULL);
-
+	MEM(fr_value_box_aprint(node, &name, &box, NULL) >= 0);
 	xlat_exp_set_name_buffer_shallow(node, name);
 	fr_value_box_copy(node, &node->data, &box);
 

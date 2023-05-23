@@ -63,9 +63,16 @@ fr_dict_attr_t const *attr_tacacs_sequence_number;
 fr_dict_attr_t const *attr_tacacs_server_message;
 fr_dict_attr_t const *attr_tacacs_session_id;
 fr_dict_attr_t const *attr_tacacs_user_message;
-fr_dict_attr_t const *attr_tacacs_user_name;
 fr_dict_attr_t const *attr_tacacs_version_major;
 fr_dict_attr_t const *attr_tacacs_version_minor;
+
+fr_dict_attr_t const *attr_tacacs_user_name;
+fr_dict_attr_t const *attr_tacacs_user_password;
+fr_dict_attr_t const *attr_tacacs_chap_password;
+fr_dict_attr_t const *attr_tacacs_chap_challenge;
+fr_dict_attr_t const *attr_tacacs_mschap_response;
+fr_dict_attr_t const *attr_tacacs_mschap2_response;
+fr_dict_attr_t const *attr_tacacs_mschap_challenge;
 
 extern fr_dict_attr_autoload_t libfreeradius_tacacs_dict_attr[];
 fr_dict_attr_autoload_t libfreeradius_tacacs_dict_attr[] = {
@@ -96,30 +103,39 @@ fr_dict_attr_autoload_t libfreeradius_tacacs_dict_attr[] = {
 	{ .out = &attr_tacacs_user_name, .name = "User-Name", .type = FR_TYPE_STRING, .dict = &dict_tacacs },
 	{ .out = &attr_tacacs_version_major, .name = "Packet.Version-Major", .type = FR_TYPE_UINT8, .dict = &dict_tacacs },
 	{ .out = &attr_tacacs_version_minor, .name = "Packet.Version-Minor", .type = FR_TYPE_UINT8, .dict = &dict_tacacs },
+
+	{ .out = &attr_tacacs_user_name, .name = "User-Name", .type = FR_TYPE_STRING, .dict = &dict_tacacs },
+	{ .out = &attr_tacacs_user_password, .name = "User-Password", .type = FR_TYPE_STRING, .dict = &dict_tacacs },
+	{ .out = &attr_tacacs_chap_password, .name = "CHAP-Password", .type = FR_TYPE_OCTETS, .dict = &dict_tacacs },
+	{ .out = &attr_tacacs_chap_challenge, .name = "CHAP-Challenge", .type = FR_TYPE_OCTETS, .dict = &dict_tacacs },
+	{ .out = &attr_tacacs_mschap_response, .name = "MS-CHAP-Response", .type = FR_TYPE_OCTETS, .dict = &dict_tacacs },
+	{ .out = &attr_tacacs_mschap2_response, .name = "MS-CHAP2-Response", .type = FR_TYPE_OCTETS, .dict = &dict_tacacs },
+	{ .out = &attr_tacacs_mschap_challenge, .name = "MS-CHAP-Challenge", .type = FR_TYPE_OCTETS, .dict = &dict_tacacs },
 	{ NULL }
 };
 
 char const *fr_tacacs_packet_names[FR_TACACS_CODE_MAX] = {
 	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_START]		= "Authentication-Start",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_PASS]	= "Authentication-Reply-Pass",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_FAIL]	= "Authentication-Reply-Fail",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETDATA]	= "Authentication-Reply-GetData",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETUSER]	= "Authentication-Reply-GetUser",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETPASS]	= "Authentication-Reply-GetPass",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_RESTART]	= "Authentication-Reply-Restart",
-	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_ERROR]	= "Authentication-Reply-Error",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_PASS]		= "Authentication-Pass",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_FAIL]		= "Authentication-Fail",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETDATA]		= "Authentication-GetData",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETUSER]		= "Authentication-GetUser",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETPASS]		= "Authentication-GetPass",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_RESTART]		= "Authentication-Restart",
+	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_ERROR]		= "Authentication-Error",
 
 	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_CONTINUE]		= "Authentication-Continue",
 	[FR_PACKET_TYPE_VALUE_AUTHENTICATION_CONTINUE_ABORT]	= "Authentication-Continue-Abort",
 
 	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_REQUEST]		= "Authorization-Request",
-	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_PASS_ADD]	= "Authorization-Reply-Pass-Add",
-	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_PASS_REPLACE]	= "Authorization-Reply-Pass-Replace",
-	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_FAIL]		= "Authorization-Reply-Fail",
+	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_PASS_ADD]		= "Authorization-Pass-Add",
+	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_PASS_REPLACE]	= "Authorization-Pass-Replace",
+	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_FAIL]		= "Authorization-Fail",
+	[FR_PACKET_TYPE_VALUE_AUTHORIZATION_ERROR]		= "Authorization-Error",
 
 	[FR_PACKET_TYPE_VALUE_ACCOUNTING_REQUEST]		= "Accounting-Request",
-	[FR_PACKET_TYPE_VALUE_ACCOUNTING_REPLY_SUCCESS]		= "Accounting-Reply-Success",
-	[FR_PACKET_TYPE_VALUE_ACCOUNTING_REPLY_ERROR]		= "Accounting-Reply-Error",
+	[FR_PACKET_TYPE_VALUE_ACCOUNTING_SUCCESS]		= "Accounting-Success",
+	[FR_PACKET_TYPE_VALUE_ACCOUNTING_ERROR]			= "Accounting-Error",
 };
 
 
@@ -136,24 +152,21 @@ void fr_tacacs_free(void)
 	fr_dict_autofree(libfreeradius_tacacs_dict);
 }
 
+/** XOR the body based on the secret key.
+ *
+ *  This function encrypts (or decrypts) TACACS+ packets, and sets the "encrypted" flag.
+ */
 int fr_tacacs_body_xor(fr_tacacs_packet_t const *pkt, uint8_t *body, size_t body_len, char const *secret, size_t secret_len)
 {
 	uint8_t pad[MD5_DIGEST_LENGTH];
-	uint8_t *buf;
+	uint8_t *buf, *end;
 	int pad_offset;
-	size_t pos;
 
-	if (!secret) {
-		if (pkt->hdr.flags & FR_TAC_PLUS_UNENCRYPTED_FLAG)
-			return 0;
-		else {
-			fr_strerror_const("Packet is encrypted but no secret for the client is set");
-			return -1;
-		}
-	}
-
-	if (pkt->hdr.flags & FR_TAC_PLUS_UNENCRYPTED_FLAG) {
-		fr_strerror_const("Packet is unencrypted but a secret has been set for the client");
+	/*
+	 *	Do some basic sanity checks.
+	 */
+	if (!secret_len) {
+		fr_strerror_const("Failed to encrypt/decrept the packet, as the secret has zero length.");
 		return -1;
 	}
 
@@ -162,6 +175,7 @@ int fr_tacacs_body_xor(fr_tacacs_packet_t const *pkt, uint8_t *body, size_t body
 	/* MD5_1 = MD5{session_id, key, version, seq_no} */
 	/* MD5_n = MD5{session_id, key, version, seq_no, MD5_n-1} */
 	buf = talloc_array(NULL, uint8_t, pad_offset + MD5_DIGEST_LENGTH);
+	if (!buf) return -1;
 
 	memcpy(&buf[0], &pkt->hdr.session_id, sizeof(pkt->hdr.session_id));
 	memcpy(&buf[sizeof(pkt->hdr.session_id)], secret, secret_len);
@@ -170,18 +184,21 @@ int fr_tacacs_body_xor(fr_tacacs_packet_t const *pkt, uint8_t *body, size_t body
 
 	fr_md5_calc(pad, buf, pad_offset);
 
-	pos = 0;
-	do {
-		for (size_t i = 0; i < MD5_DIGEST_LENGTH && pos < body_len; i++, pos++)
-			body[pos] ^= pad[i];
+	end = body + body_len;
+	while (body < end) {
+		size_t i;
 
-		if (pos == body_len)
-			break;
+		for (i = 0; i < MD5_DIGEST_LENGTH; i++) {
+			*body ^= pad[i];
+
+			if (++body == end) goto done;
+		}
 
 		memcpy(&buf[pad_offset], pad, MD5_DIGEST_LENGTH);
 		fr_md5_calc(pad, buf, pad_offset + MD5_DIGEST_LENGTH);
-	} while (1);
+	}
 
+done:
 	talloc_free(buf);
 
 	return 0;
@@ -298,9 +315,6 @@ ssize_t fr_tacacs_length(uint8_t const *buffer, size_t buffer_len)
 
 static void print_hex(fr_log_t const *log, char const *file, int line, char const *prefix, uint8_t const *data, size_t datalen, uint8_t const *end)
 {
-	size_t i, j, left;
-	char buffer[16*3+1];
-
 	if ((data + datalen) > end) {
 		fr_assert(data <= end);
 
@@ -314,22 +328,7 @@ static void print_hex(fr_log_t const *log, char const *file, int line, char cons
 
 	if (!datalen) return;
 
-	for (i = 0; i < datalen; i += 16) {
-		char *q = buffer;
-
-		left = 16;
-		if ((i + left) > datalen) left = datalen - i;
-
-		for (j = 0; j < left; j++) {
-			sprintf(q, "%02x ", data[i + j]);
-			q += 3;
-		}
-
-		q--;
-		*q = '\0';
-
-		fr_log(log, L_DBG, file, line, "%s %s", prefix, buffer);
-	}
+	fr_log_hex(log, L_DBG, file, line, data, datalen, "%s", prefix);
 }
 
 static void print_ascii(fr_log_t const *log, char const *file, int line, char const *prefix, uint8_t const *data, size_t datalen, uint8_t const *end)
@@ -353,25 +352,25 @@ static void print_ascii(fr_log_t const *log, char const *file, int line, char co
 	fr_log(log, L_DBG, file, line, "%s %.*s", prefix, (int) datalen, (char const *) data);
 }
 
-static void print_args(fr_log_t const *log, char const *file, int line, uint8_t const *start, size_t arg_cnt, uint8_t const *end)
+static void print_args(fr_log_t const *log, char const *file, int line, size_t arg_cnt, uint8_t const *argv, uint8_t const *start, uint8_t const *end)
 {
 	size_t i;
 	uint8_t const *p;
 	char prefix[64];
 
-	if (start + arg_cnt > end) {
+	if (argv + arg_cnt > end) {
 		fr_log(log, L_DBG, file, line, "      ARG cnt overflows packet");
 		return;
 	}
 
-	p = start + arg_cnt;
+	p = start;
 	for (i = 0; i < arg_cnt; i++) {
 		if (p == end) {
 			fr_log(log, L_DBG, file, line, "      ARG[%zu] is at EOF", i);
 			return;
 		}
 
-		if ((p + start[i]) > end) {
+		if ((p + argv[i]) > end) {
 			fr_log(log, L_DBG, file, line, "      ARG[%zu] overflows packet", i);
 			print_hex(log, file, line, "                     ", p, end - p, end);
 			return;
@@ -380,9 +379,9 @@ static void print_args(fr_log_t const *log, char const *file, int line, uint8_t 
 		snprintf(prefix, sizeof(prefix), "      arg[%zu]            ", i);
 		prefix[21] = '\0';
 
-		print_ascii(log, file, line, prefix, p, start[i], end);
+		print_ascii(log, file, line, prefix, p, argv[i], end);
 
-		p += start[i];
+		p += argv[i];
 	}
 }
 
@@ -390,7 +389,7 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 {
 	size_t length;
 	uint8_t const *p = (uint8_t const *) packet;
-	uint8_t const *hdr, *end;
+	uint8_t const *hdr, *end, *args;
 
 	/*
 	 *	It has to be at least 12 bytes long.
@@ -556,6 +555,7 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 			fr_log(log, L_DBG, file, line, "      rem_addr_len    %02x", hdr[6]);
 			fr_log(log, L_DBG, file, line, "      arg_cnt         %02x", hdr[7]);
 			p = hdr + 8;
+			args = p;
 
 			OVERFLOW8(hdr[4], user_len);
 			OVERFLOW8(hdr[5], port_len);
@@ -574,10 +574,10 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 			print_ascii(log, file, line, "      rem_addr       ", p, hdr[6], end);
 			p += hdr[6];
 
-			print_args(log, file, line, p, hdr[7], end);
+			print_args(log, file, line, hdr[7], args, p, end);
 
 		} else {
-			fr_log(log, L_DBG, file, line, "      authorization-response");
+			fr_log(log, L_DBG, file, line, "      authorization-reply");
 
 			fr_assert(packet_is_author_reply(packet));
 
@@ -588,6 +588,7 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 			fr_log(log, L_DBG, file, line, "      server_msg_len  %04x", fr_nbo_to_uint16(hdr + 2));
 			fr_log(log, L_DBG, file, line, "      data_len        %04x", fr_nbo_to_uint16(hdr + 4));
 			p = hdr + 6;
+			args = p;
 
 			OVERFLOW8(hdr[1], arg_cnt);
 			OVERFLOW16(hdr + 2, server_msg_len);
@@ -602,13 +603,13 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 			print_ascii(log, file, line, "      data           ", p, fr_nbo_to_uint16(hdr + 4), end);
 			p += fr_nbo_to_uint16(hdr + 4);
 
-			print_args(log, file, line, p, hdr[1], end);
+			print_args(log, file, line, hdr[1], args, p, end);
 		}
 		break;
 
 	case FR_TAC_PLUS_ACCT:
 		if (packet_is_acct_request(packet)) {
-			fr_log(log, L_DBG, file, line, "      accounting-response");
+			fr_log(log, L_DBG, file, line, "      accounting-request");
 
 			REQUIRE(9);
 
@@ -622,8 +623,9 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 			fr_log(log, L_DBG, file, line, "      rem_addr_len    %02x", hdr[7]);
 			fr_log(log, L_DBG, file, line, "      arg_cnt         %02x", hdr[8]);
 			p = hdr + 8;
+			args = p;
 
-			OVERFLOW8(hdr[8], arg_cnt);
+			OVERFLOW8(hdr[4], arg_cnt);
 			OVERFLOW8(hdr[5], user_len);
 			OVERFLOW8(hdr[6], port_len);
 			OVERFLOW8(hdr[7], rem_addr_len);
@@ -640,7 +642,7 @@ void _fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *pa
 			print_ascii(log, file, line, "      rem_addr       ", p, hdr[6], end);
 			p += hdr[7];
 
-			print_args(log, file, line, p, hdr[8], end);
+			print_args(log, file, line, hdr[8], args, p, end);
 		} else {
 			fr_log(log, L_DBG, file, line, "      accounting-reply");
 			fr_assert(packet_is_acct_reply(packet));

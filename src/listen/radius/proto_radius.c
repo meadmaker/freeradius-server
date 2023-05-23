@@ -197,12 +197,11 @@ static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF
 /** Decode the packet
  *
  */
-static int mod_decode(void const *instance, request_t *request, uint8_t *const data, size_t data_len)
+static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *const data, size_t data_len)
 {
-	proto_radius_t const	*inst = talloc_get_type_abort_const(instance, proto_radius_t);
 	fr_io_track_t const	*track = talloc_get_type_abort_const(request->async->packet_ctx, fr_io_track_t);
 	fr_io_address_t const  	*address = track->address;
-	RADCLIENT const		*client;
+	fr_client_t const		*client;
 
 	fr_assert(data[0] < FR_RADIUS_CODE_MAX);
 
@@ -247,7 +246,7 @@ static int mod_decode(void const *instance, request_t *request, uint8_t *const d
 	/*
 	 *	Set the rest of the fields.
 	 */
-	request->client = UNCONST(RADCLIENT *, client);
+	request->client = UNCONST(fr_client_t *, client);
 
 	request->packet->socket = address->socket;
 	fr_socket_addr_swap(&request->reply->socket, &address->socket);
@@ -306,21 +305,15 @@ static int mod_decode(void const *instance, request_t *request, uint8_t *const d
 		request->async->sequence = 1;
 	}
 
-	if (!inst->io.app_io->decode) return 0;
-
-	/*
-	 *	Let the app_io do anything it needs to do.
-	 */
-	return inst->io.app_io->decode(inst->io.app_io_instance, request, data, data_len);
+	return 0;
 }
 
-static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buffer, size_t buffer_len)
+static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8_t *buffer, size_t buffer_len)
 {
-	proto_radius_t const	*inst = talloc_get_type_abort_const(instance, proto_radius_t);
 	fr_io_track_t		*track = talloc_get_type_abort(request->async->packet_ctx, fr_io_track_t);
 	fr_io_address_t const  	*address = track->address;
 	ssize_t			data_len;
-	RADCLIENT const		*client;
+	fr_client_t const		*client;
 
 	/*
 	 *	Process layer NAK, or "Do not respond".
@@ -339,7 +332,7 @@ static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buf
 	 *	Dynamic client stuff
 	 */
 	if (client->dynamic && !client->active) {
-		RADCLIENT *new_client;
+		fr_client_t *new_client;
 
 		fr_assert(buffer_len >= sizeof(client));
 
@@ -371,15 +364,6 @@ static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buf
 
 		memcpy(buffer, &new_client, sizeof(new_client));
 		return sizeof(new_client);
-	}
-
-	/*
-	 *	If the app_io encodes the packet, then we don't need
-	 *	to do that.
-	 */
-	if (inst->io.app_io->encode) {
-		data_len = inst->io.app_io->encode(inst->io.app_io_instance, request, buffer, buffer_len);
-		if (data_len > 0) return data_len;
 	}
 
 	/*

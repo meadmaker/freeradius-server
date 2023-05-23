@@ -224,11 +224,12 @@ int cf_pair_parse_value(TALLOC_CTX *ctx, void *out, UNUSED void *base, CONF_ITEM
 						.attr = {
 							.allow_unknown = true,
 							.allow_unresolved = true,
-							.allow_foreign = true
+							.allow_foreign = true,
 						}
 					};
 		fr_sbuff_t		sbuff = FR_SBUFF_IN(cp->value, strlen(cp->value));
 
+		rules.attr.list_def = request_attr_request;
 		/*
 		 *	Parse the cast operator for barewords
 		 */
@@ -1068,7 +1069,6 @@ static int cf_parse_tmpl_pass2(UNUSED CONF_SECTION *cs, tmpl_t **out, CONF_PAIR 
 		break;
 
 	case TMPL_TYPE_ATTR:
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_DATA:
 	case TMPL_TYPE_EXEC:
 	case TMPL_TYPE_EXEC_UNRESOLVED:
@@ -1221,6 +1221,7 @@ int cf_section_parse_pass2(void *base, CONF_SECTION *cs)
 					     &(tmpl_rules_t) {
 						     .attr = {
 							     .dict_def = dict,
+							     .list_def = request_attr_request,
 							     .allow_unknown = false,
 							     .allow_unresolved = false,
 							     .allow_foreign = (dict == NULL)

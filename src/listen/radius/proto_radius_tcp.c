@@ -62,6 +62,8 @@ typedef struct {
 	bool				dynamic_clients;	//!< whether we have dynamic clients
 	bool				dedup_authenticator;	//!< dedup using the request authenticator
 
+	fr_client_list_t			*clients;		//!< local clients
+
 	fr_trie_t			*trie;			//!< for parsed networks
 	fr_ipaddr_t			*allow;			//!< allowed networks for dynamic clients
 	fr_ipaddr_t			*deny;			//!< denied networks for dynamic clients
@@ -163,12 +165,10 @@ static ssize_t mod_read(fr_listen_t *li, UNUSED void **packet_ctx, fr_time_t *re
 	}
 
 	/*
-	 *	We've read more than one packet.  Tell the caller that
+	 *	We've read at least one packet.  Tell the caller that
 	 *	there's more data available, and return only one packet.
 	 */
-	if (in_buffer > packet_len) {
-		*leftover = in_buffer - packet_len;
-	}
+	*leftover = in_buffer - packet_len;
 
 	/*
 	 *      If it's not a RADIUS packet, ignore it.
@@ -290,6 +290,7 @@ static int mod_open(fr_listen_t *li)
 	proto_radius_tcp_thread_t	*thread = talloc_get_type_abort(li->thread_instance, proto_radius_tcp_thread_t);
 
 	int				sockfd;
+	fr_ipaddr_t			ipaddr = inst->ipaddr;
 	uint16_t			port = inst->port;
 
 	fr_assert(!thread->connection);
@@ -301,7 +302,9 @@ static int mod_open(fr_listen_t *li)
 		return -1;
 	}
 
-	if (fr_socket_bind(sockfd, &inst->ipaddr, &port, inst->interface) < 0) {
+	(void) fr_nonblock(sockfd);
+
+	if (fr_socket_bind(sockfd, inst->interface, &ipaddr, &port) < 0) {
 		close(sockfd);
 		PERROR("Failed binding socket");
 		goto error;
@@ -343,7 +346,7 @@ static int mod_fd_set(fr_listen_t *li, int fd)
 	return 0;
 }
 
-static int mod_track_compare(void const *instance, UNUSED void *thread_instance, UNUSED RADCLIENT *client,
+static int mod_track_compare(void const *instance, UNUSED void *thread_instance, UNUSED fr_client_t *client,
 			     void const *one, void const *two)
 {
 	int ret;
@@ -387,6 +390,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	proto_radius_tcp_t	*inst = talloc_get_type_abort(mctx->inst->data, proto_radius_tcp_t);
 	CONF_SECTION		*conf = mctx->inst->conf;
 	size_t			i, num;
+	CONF_ITEM		*ci;
+	CONF_SECTION		*server_cs;
 
 	inst->cs = conf;
 
@@ -571,11 +576,41 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 	}
 
+	ci = cf_parent(inst->cs); /* listen { ... } */
+	fr_assert(ci != NULL);
+	ci = cf_parent(ci);
+	fr_assert(ci != NULL);
+
+	server_cs = cf_item_to_section(ci);
+
+	/*
+	 *	Look up local clients, if they exist.
+	 */
+	if (cf_section_find_next(server_cs, NULL, "client", CF_IDENT_ANY)) {
+		inst->clients = client_list_parse_section(server_cs, IPPROTO_TCP, false);
+		if (!inst->clients) {
+			cf_log_err(conf, "Failed creating local clients");
+			return -1;
+		}
+	}
+
 	return 0;
 }
 
-static RADCLIENT *mod_client_find(UNUSED fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
+static fr_client_t *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
 {
+	proto_radius_tcp_t const	*inst = talloc_get_type_abort_const(li->app_io_instance, proto_radius_tcp_t);
+
+	/*
+	 *	Prefer local clients.
+	 */
+	if (inst->clients) {
+		fr_client_t *client;
+
+		client = client_find(inst->clients, ipaddr, ipproto);
+		if (client) return client;
+	}
+
 	return client_find(NULL, ipaddr, ipproto);
 }
 

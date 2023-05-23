@@ -95,6 +95,8 @@ typedef struct {
 
 	unsigned int		counter : 1;       		//!< integer attribute is actually an impulse / counter
 
+	unsigned int		name_only : 1;			//!< this attribute should always be referred to by name, not by number
+
 	/*
 	 *	@todo - if we want to clean these fields up, make
 	 *	"subtype" and "type_size" both 4-bit bitfields.  That
@@ -143,6 +145,7 @@ enum {
 #define fr_dict_attr_is_key_field(_da) ((_da)->flags.extra && ((_da)->flags.subtype == FLAG_KEY_FIELD))
 #define da_is_bit_field(_da) ((_da)->flags.extra && ((_da)->flags.subtype == FLAG_BIT_FIELD))
 #define da_is_length_field(_da) ((_da)->flags.extra && (((_da)->flags.subtype == FLAG_LENGTH_UINT8) || ((_da)->flags.subtype == FLAG_LENGTH_UINT16)))
+#define da_length_offset(_da) ((_da)->flags.type_size)
 
 
 /** Extension identifier
@@ -172,6 +175,8 @@ struct dict_attr_s {
 
 	unsigned int		attr;				//!< Attribute number.
 	unsigned int		depth;				//!< Depth of nesting for this attribute.
+
+	unsigned int		last_child_attr;		//!< highest value of last child attribute.
 
 	fr_type_t		type;				//!< Value type.
 
@@ -469,6 +474,8 @@ fr_dict_attr_t const	*fr_dict_attr_by_oid(fr_dict_attr_err_t *err,
 					     CC_HINT(nonnull(2,3));
 
 bool			fr_dict_attr_compatible(fr_dict_attr_t const *a, fr_dict_attr_t const *b) CC_HINT(nonnull);
+
+bool			fr_dict_attr_can_contain(fr_dict_attr_t const *parent, fr_dict_attr_t const *child) CC_HINT(nonnull);
 
 /** @} */
 

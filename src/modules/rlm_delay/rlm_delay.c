@@ -29,6 +29,7 @@ RCSID("$Id$")
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/server/map_proc.h>
 #include <freeradius-devel/util/time.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 typedef struct {
 	tmpl_t		*delay;			//!< How long we delay for.
@@ -127,10 +128,8 @@ static unlang_action_t mod_delay_return(rlm_rcode_t *p_result, module_ctx_t cons
 	RETURN_MODULE_OK;
 }
 
-static void mod_delay_cancel(module_ctx_t const *mctx, request_t *request, fr_state_signal_t action)
+static void mod_delay_cancel(module_ctx_t const *mctx, request_t *request, UNUSED fr_signal_t action)
 {
-	if (action != FR_SIGNAL_CANCEL) return;
-
 	RDEBUG2("Cancelling delay");
 
 	(void) unlang_module_timeout_delete(request, mctx->rctx);
@@ -174,12 +173,12 @@ static unlang_action_t CC_HINT(nonnull) mod_delay(rlm_rcode_t *p_result, module_
 		RETURN_MODULE_FAIL;
 	}
 
-	return unlang_module_yield(request, mod_delay_return, mod_delay_cancel, yielded_at);
+	return unlang_module_yield(request, mod_delay_return, mod_delay_cancel, ~FR_SIGNAL_CANCEL, yielded_at);
 }
 
 static xlat_action_t xlat_delay_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				       xlat_ctx_t const *xctx,
-				       request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+				       request_t *request, UNUSED fr_value_box_list_t *in)
 {
 	fr_time_t	*yielded_at = talloc_get_type_abort(xctx->rctx, fr_time_t);
 	fr_time_delta_t	delayed;
@@ -198,10 +197,8 @@ static xlat_action_t xlat_delay_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	return XLAT_ACTION_DONE;
 }
 
-static void xlat_delay_cancel(UNUSED xlat_ctx_t const *xctx, request_t *request, fr_state_signal_t action)
+static void xlat_delay_cancel(UNUSED xlat_ctx_t const *xctx, request_t *request, UNUSED fr_signal_t action)
 {
-	if (action != FR_SIGNAL_CANCEL) return;
-
 	RDEBUG2("Cancelling delay");
 }
 
@@ -221,7 +218,7 @@ static xlat_arg_parser_t const xlat_delay_args[] = {
  */
 static xlat_action_t xlat_delay(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 				xlat_ctx_t const *xctx,
-				request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				request_t *request, fr_value_box_list_t *in)
 {
 	rlm_delay_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_delay_t);
 	fr_time_t		resume_at, *yielded_at;
@@ -260,7 +257,7 @@ yield:
 		return XLAT_ACTION_FAIL;
 	}
 
-	return unlang_xlat_yield(request, xlat_delay_resume, xlat_delay_cancel, yielded_at);
+	return unlang_xlat_yield(request, xlat_delay_resume, xlat_delay_cancel, ~FR_SIGNAL_CANCEL, yielded_at);
 }
 
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
@@ -268,8 +265,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	rlm_delay_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_delay_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, xlat_delay, FR_TYPE_TIME_DELTA, 0);
-	xlat_func_args(xlat, xlat_delay_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_delay, FR_TYPE_TIME_DELTA);
+	xlat_func_args_set(xlat, xlat_delay_args);
 	return 0;
 }
 

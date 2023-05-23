@@ -88,12 +88,12 @@ static_assert(sizeof(unsigned int) >= 4, "Unsigned integer too small on this pla
 #define fr_dlist_foreach_safe(_list_head, _type, _iter) \
 { \
 	_type *_iter; \
-	fr_dlist_t _tmp; \
+	fr_dlist_t _tmp ## _iter; \
 	for (_iter = fr_dlist_head(_list_head), \
-	     _tmp = fr_dlist_head(_list_head) ? *fr_dlist_item_to_entry((_list_head)->offset, fr_dlist_head(_list_head)) : (fr_dlist_t){ .prev = NULL, .next = NULL }; \
+	     _tmp ## _iter = fr_dlist_head(_list_head) ? *fr_dlist_item_to_entry((_list_head)->offset, fr_dlist_head(_list_head)) : (fr_dlist_t){ .prev = NULL, .next = NULL }; \
 	     _iter; \
-	     _iter = _tmp.next && (_tmp.next != &(_list_head)->entry) ? fr_dlist_entry_to_item((_list_head)->offset, _tmp.next) : NULL, \
-	     _tmp = _tmp.next && (_tmp.next != &(_list_head)->entry) ? *_tmp.next : (fr_dlist_t){ .prev = NULL, .next = NULL })
+	     _iter = _tmp ## _iter.next && (_tmp ## _iter.next != &(_list_head)->entry) ? fr_dlist_entry_to_item((_list_head)->offset, _tmp ## _iter.next) : NULL, \
+	     _tmp ## _iter = _tmp ## _iter.next && (_tmp ## _iter.next != &(_list_head)->entry) ? *_tmp ## _iter.next : (fr_dlist_t){ .prev = NULL, .next = NULL })
 
 
 /** Find the dlist pointers within a list item
@@ -352,6 +352,8 @@ static inline CC_HINT(nonnull) int fr_dlist_insert_head(fr_dlist_head_t *list_he
  * @return
  * 	- 0 on success.
  *	- -1 on failure.
+ *
+ * @hidecallergraph
  */
 static inline CC_HINT(nonnull) int fr_dlist_insert_tail(fr_dlist_head_t *list_head, void *ptr)
 {
@@ -458,6 +460,8 @@ static inline CC_HINT(nonnull(1,3)) int fr_dlist_insert_before(fr_dlist_head_t *
  * @return
  *	- The HEAD item.
  *	- NULL if no items exist in the list.
+ *
+ * @hidecallergraph
  */
 static inline CC_HINT(nonnull) void *fr_dlist_head(fr_dlist_head_t const *list_head)
 {
@@ -526,6 +530,7 @@ static inline CC_HINT(nonnull) void *fr_dlist_tail(fr_dlist_head_t const *list_h
  *	- The next item in the list if ptr is not NULL.
  *	- The head of the list if ptr is NULL.
  *	- NULL if ptr is the tail of the list (no more items).
+ * @hidecallergraph
  */
 static inline CC_HINT(nonnull(1)) void *fr_dlist_next(fr_dlist_head_t const *list_head, void const *ptr)
 {
@@ -607,6 +612,8 @@ static inline CC_HINT(nonnull(1)) void *fr_dlist_prev(fr_dlist_head_t const *lis
  * @return
  *	- The previous item in the list (makes iteration easier).
  *	- NULL if we just removed the head of the list.
+ *
+ * @hidecallergraph
  */
 static inline CC_HINT(nonnull(1)) void *fr_dlist_remove(fr_dlist_head_t *list_head, void *ptr)
 {
@@ -863,7 +870,7 @@ static inline void fr_dlist_talloc_free_to_tail(fr_dlist_head_t *head, void *ptr
 {
 	void *e = ptr, *p;
 
-	if (!ptr) return;	/* uninitialized means don't do anything */
+	if (!ptr) return;	/* NULL means don't do anything */
 
 	while (e) {
 		p = fr_dlist_next(head, e);
@@ -1102,6 +1109,16 @@ static inline void fr_dlist_noop(void)
 #define FR_DLIST_TYPES(_name) \
 	typedef struct { fr_dlist_t entry; } FR_DLIST_ENTRY(_name); \
 	typedef struct { fr_dlist_head_t head; } FR_DLIST_HEAD(_name); \
+
+/** Define friendly names for type specific dlist head and entry structures
+ *
+ * @param[in] _name	Prefix we add to type-specific structures.
+ * @param[in] _head	Name to use for head structure.
+ * @param[in] _entry	Name to use for entry structure.
+*/
+#define FR_DLIST_TYPEDEFS(_name, _head, _entry) \
+	typedef FR_DLIST_HEAD(_name) _head; \
+	typedef FR_DLIST_ENTRY(_name) _entry;
 
 /** Define type specific wrapper functions for dlists
  *

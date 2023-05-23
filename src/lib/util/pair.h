@@ -89,7 +89,7 @@ struct value_pair_s {
 			 * fr_value_box_t which gives us much greater packing efficiency.
 			 */
 			uint8_t		pad[offsetof(fr_value_box_t, type) + sizeof(fr_type_t)];
-	
+
 			fr_pair_list_t	children;		//!< Nested attributes of this pair.
 		};
 	};
@@ -101,19 +101,6 @@ struct value_pair_s {
 		fr_token_t		op;			//!< Operator to use when moving or inserting
 	};
 };
-
-/** A fr_pair_t in string format.
- *
- * Used to represent pairs in the legacy 'users' file format.
- */
-typedef struct {
-	char l_opand[256];					//!< Left hand side of the pair.
-	char r_opand[1024];					//!< Right hand side of the pair.
-
-	fr_token_t quote;					//!< Type of quoting around the r_opand.
-
-	fr_token_t op;						//!< Operator.
-} fr_pair_t_RAW;
 
 #define vp_strvalue		data.vb_strvalue
 #define vp_octets		data.vb_octets
@@ -256,7 +243,7 @@ static inline bool vp_da_data_type_check(fr_pair_t *vp)
 	return false;
 }
 
-/** Iterate over the contents of a #pair_list_t
+/** Iterate over the contents of a #fr_pair_list_t
  *
  *  The iteration variable can be safely removed from the list at each pass.
  *
@@ -428,6 +415,7 @@ do { \
 } while (0)
 
 /* Initialisation */
+/** @hidecallergraph */
 void fr_pair_list_init(fr_pair_list_t *head) CC_HINT(nonnull);
 
 void fr_pair_init_null(fr_pair_t *vp) CC_HINT(nonnull);
@@ -467,6 +455,7 @@ bool		fr_pair_matches_da(void const *item, void const *uctx) CC_HINT(nonnull);
 unsigned int	fr_pair_count_by_da(fr_pair_list_t const *list, fr_dict_attr_t const *da)
 				    CC_HINT(nonnull);
 
+/** @hidecallergraph */
 fr_pair_t	*fr_pair_find_by_da(fr_pair_list_t const *list,
 				    fr_pair_t const *prev, fr_dict_attr_t const *da) CC_HINT(nonnull(1,3));
 
@@ -489,6 +478,7 @@ fr_pair_t	*fr_pair_find_by_child_num_idx(fr_pair_list_t const *list,
 					       fr_dict_attr_t const *parent, unsigned int attr,
 					       unsigned int idx) CC_HINT(nonnull);
 
+/** @hidecallergraph */
 int		fr_pair_append(fr_pair_list_t *list, fr_pair_t *vp) CC_HINT(nonnull);
 
 int		fr_pair_prepend(fr_pair_list_t *list, fr_pair_t *vp) CC_HINT(nonnull);
@@ -511,8 +501,8 @@ int		fr_pair_prepend_by_da(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t *lis
 int		fr_pair_append_by_da_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t *list,
 					    fr_dict_attr_t const *da) CC_HINT(nonnull(3,4));
 
-int		fr_pair_update_by_da(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t *list,
-				     fr_dict_attr_t const *da, unsigned int n) CC_HINT(nonnull(3,4));
+int		fr_pair_update_by_da_parent(fr_pair_t *parent, fr_pair_t **out,
+					    fr_dict_attr_t const *da) CC_HINT(nonnull(1,3));
 
 int		fr_pair_delete_by_da(fr_pair_list_t *head, fr_dict_attr_t const *da) CC_HINT(nonnull);
 
@@ -537,10 +527,10 @@ int		fr_pair_unflatten(fr_pair_t *vp)  CC_HINT(nonnull);
  *
  * @note This is the only way to use a dcursor in non-const mode with fr_pair_list_t.
  *
- * @param[out] cursor	to initialise.
- * @param[in] list	to iterate over.
- * @param[in] iter	Iterator to use when filtering pairs.
- * @param[in] uctx	To pass to iterator.
+ * @param[out] _cursor	to initialise.
+ * @param[in] _list	to iterate over.
+ * @param[in] _iter	Iterator to use when filtering pairs.
+ * @param[in] _uctx	To pass to iterator.
  * @return
  *	- NULL if src does not point to any items.
  *	- The first pair in the list.
@@ -561,8 +551,8 @@ fr_pair_t	*_fr_pair_dcursor_iter_init(fr_dcursor_t *cursor, fr_pair_list_t const
  *
  * @note This is the only way to use a dcursor in non-const mode with fr_pair_list_t.
  *
- * @param[out] cursor	to initialise.
- * @param[in] list	to iterate over.
+ * @param[out] _cursor	to initialise.
+ * @param[in] _list	to iterate over.
  * @return
  *	- NULL if src does not point to any items.
  *	- The first pair in the list.
@@ -576,9 +566,9 @@ fr_pair_t	*_fr_pair_dcursor_init(fr_dcursor_t *cursor, fr_pair_list_t const *lis
 
 /** Initialise a cursor that will return only attributes matching the specified #fr_dict_attr_t
  *
- * @param[in] cursor	to initialise.
- * @param[in] list	to iterate over.
- * @param[in] da	to search for.
+ * @param[in] _cursor	to initialise.
+ * @param[in] _list	to iterate over.
+ * @param[in] _da	to search for.
  * @return
  *	- The first matching pair.
  *	- NULL if no pairs match.
@@ -594,9 +584,9 @@ fr_pair_t	*_fr_pair_dcursor_by_da_init(fr_dcursor_t *cursor,
 
 /** Initialise a cursor that will return only attributes descended from the specified #fr_dict_attr_t
  *
- * @param[in] cursor	to initialise.
- * @param[in] list	to iterate over.
- * @param[in] da	who's decentness to search for.
+ * @param[in] _cursor	to initialise.
+ * @param[in] _list	to iterate over.
+ * @param[in] _da	who's decentness to search for.
  * @return
  *	- The first matching pair.
  *	- NULL if no pairs match.
@@ -610,28 +600,8 @@ fr_pair_t	*_fr_pair_dcursor_by_ancestor_init(fr_dcursor_t *cursor,
 						   fr_pair_list_t const *list, fr_dict_attr_t const *da,
 						   bool is_const) CC_HINT(nonnull);
 
-/** Initialises a special dcursor which returns only the values of the pairs
- *
- *  @note - the list cannot be modified, and structural attributes are not returned.
- *
- * @param[out] cursor	to initialise.
- * @return
- *	- NULL if src does not point to any items.
- *	- The value-box from the first pair in the list.
- */
 fr_value_box_t	*fr_pair_dcursor_value_init(fr_dcursor_t *cursor) CC_HINT(nonnull);
 
-
-/** Initialises a special dcursor which returns only the values of a pair from a parent dcursor
- *
- *  @note - the list cannot be modified, and structural attributes are not returned.
- *
- * @param[out] cursor	to initialise.
- * @param[in] parent	dcursor which returns #fr_pair_t
- * @return
- *	- NULL if src does not point to any items.
- *	- The value-box from the first pair in the parent dcursor.
- */
 fr_value_box_t	*fr_pair_dcursor_nested_init(fr_dcursor_t *cursor, fr_dcursor_t *parent) CC_HINT(nonnull);
 
 /** Compare two attributes using and operator.

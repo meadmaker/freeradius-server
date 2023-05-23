@@ -84,6 +84,7 @@ static int process_file(char const *filename)
 	tmpl_rules_t	parse_rules = {
 		.attr = {
 			.dict_def = dict_radius,
+			.list_def = request_attr_request,
 			.allow_foreign = false, /* tests are in the RADIUS dictionary */
 		}
 	};
@@ -256,6 +257,11 @@ int main(int argc, char *argv[])
 		EXIT_WITH_FAILURE;
 	}
 
+	if (request_global_init() < 0) {
+		fr_perror("unit_test_module");
+		EXIT_WITH_FAILURE;
+	}
+
 	if (argc < 2) {
 		ret = process_file("-");
 
@@ -279,6 +285,8 @@ cleanup:
 	 *	memory, so we get clean talloc reports.
 	 */
 	xlat_free();
+
+	request_global_free();
 
 	/*
 	 *	Free any autoload dictionaries

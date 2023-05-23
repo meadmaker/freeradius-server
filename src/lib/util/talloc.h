@@ -73,7 +73,7 @@ talloc_foreach(vpt_m, vpt) {
  *			Will be declared in the scope of the loop.
  */
 #define talloc_foreach(_array, _iter) \
-	for (__typeof__(_array[0]) _iter, *_p = (void *)(_array), *_end = (void *)((_array) + talloc_array_length(_array)); \
+	for (__typeof__(_array[0]) _iter, *_p = (void *)(_array), *_end = _array ? (void *)((_array) + talloc_array_length(_array)) : NULL; \
 	     (_p < _end) && (_iter = *((void **)(uintptr_t)(_p))); \
 	     _p = (__typeof__(_p))((__typeof__(_array))_p) + 1)
 
@@ -171,6 +171,8 @@ static inline TALLOC_CTX *_talloc_zero_pooled_object(const void *ctx,
 
 /** @hidecallergraph */
 char		*talloc_typed_strdup(TALLOC_CTX *ctx, char const *p);
+
+char		*talloc_typed_strdup_buffer(TALLOC_CTX *ctx, char const *p);
 
 char		*talloc_typed_asprintf(TALLOC_CTX *ctx, char const *fmt, ...) CC_HINT(format (printf, 2, 3));
 

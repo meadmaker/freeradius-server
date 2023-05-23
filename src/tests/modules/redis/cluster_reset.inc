@@ -15,6 +15,17 @@
 	&Tmp-Integer-0 = 8
 	&Tmp-Integer-0 = 9
 	&Tmp-Integer-0 = 10
+	&Tmp-Integer-0 = 11
+	&Tmp-Integer-0 = 12
+	&Tmp-Integer-0 = 13
+	&Tmp-Integer-0 = 14
+	&Tmp-Integer-0 = 15
+	&Tmp-Integer-0 = 16
+	&Tmp-Integer-0 = 17
+	&Tmp-Integer-0 = 18
+	&Tmp-Integer-0 = 19
+	&Tmp-Integer-0 = 20
+	&Tmp-Integer-0 = 21
 }
 
 &control.Tmp-String-0 := "1-%{randstr:aaaaaaaa}"
@@ -30,10 +41,10 @@ if ("$ENV{REDIS_CLUSTER_CONTROL}" == '') {
 #
 #  Reset the cluster
 #
-&control.Tmp-String-0 := `%{control.Tmp-String-8} stop`
-&control.Tmp-String-0 := `%{control.Tmp-String-8} clean`
-&control.Tmp-String-0 := `%{control.Tmp-String-8} start`
-&control.Tmp-String-0 := `%{control.Tmp-String-8} create`
+&Tmp-String-0 := `%{control.Tmp-String-8} stop`
+&Tmp-String-0 := `%{control.Tmp-String-8} clean`
+&Tmp-String-0 := `%{control.Tmp-String-8} start`
+&Tmp-String-0 := `%{control.Tmp-String-8} create`
 
 #
 #  Determine when initial synchronisation has been completed
@@ -55,7 +66,7 @@ foreach &control.Tmp-Integer-0 {
 	#
 	#  Force a remap as the slaves don't show up in the cluster immediately
 	#
-	if ("%(redis_remap:%{Tmp-String-0}:30001)" == 'success') {
+	if ("%(redis.remap:%{Tmp-String-0}:30001)" == 'success') {
 		#  Hashes to Redis cluster node master 0 (1)
 		if (("%(redis:SET b "%{control.Tmp-String-0}")" == 'OK') && \
 		    ("%(redis:SET c "%{control.Tmp-String-1}")" == 'OK') && \
@@ -65,9 +76,9 @@ foreach &control.Tmp-Integer-0 {
 			#  so we now need to figure out which slave each of those keys
 			#  ended up on.
 			#
-			if (("%(redis:-@%(redis_node:b 1) GET b)" == "%{control.Tmp-String-0}") && \
-			    ("%(redis:-@%(redis_node:c 1) GET c)" == "%{control.Tmp-String-1}") && \
-			    ("%(redis:-@%(redis_node:d 1) GET d)" == "%{control.Tmp-String-2}")) {
+			if (("%(redis:-@%(redis.node:b 1) GET b)" == "%{control.Tmp-String-0}") && \
+			    ("%(redis:-@%(redis.node:c 1) GET c)" == "%{control.Tmp-String-1}") && \
+			    ("%(redis:-@%(redis.node:d 1) GET d)" == "%{control.Tmp-String-2}")) {
 				break
 			}
 		}
@@ -75,10 +86,18 @@ foreach &control.Tmp-Integer-0 {
 
 	&request -= &Module-Failure-Message[*]
 
-	# Perform checks every 0.5 seconds
-	&Tmp-Integer-0 := `/bin/sleep 0.5`
+	# Perform checks every half second for 10 seconds.
+	#
+	# The cluster tends to come up within a couple of seconds, but it takes longer
+	# for the replicas to be displayed in cluster slot output (usually ~5 seconds).
+	%(delay:0.5)
 
-	if ("%{Foreach-Variable-0}" == 10) {
+	#
+	#  If the cluster is still not behaving
+	#  abandon the test to avoid false negatives
+	#
+	if ("%{Foreach-Variable-0}" == 20) {
 		test_fail
+		return
 	}
 }

@@ -12,7 +12,6 @@ env:
   ASAN_OPTIONS: symbolize=1 detect_leaks=1 detect_stack_use_after_return=1
   LSAN_OPTIONS: fast_unwind_on_malloc=0:malloc_context_size=50
   UBSAN_OPTIONS: print_stacktrace=1
-  KQUEUE_DEBUG: yes
   M_PERTURB: "0x42"
   PANIC_ACTION: "gdb -batch -x raddb/panic.gdb %e %p 1>&0 2>&0"
 # Stops the utilities forking on every call to check if they're running under GDB/LLDB
@@ -35,6 +34,8 @@ jobs:
     # Map a step output to a job output
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip }}
+      selfhosted: ${{ github.repository_owner == 'FreeRADIUS' && '1' || '0' }}
+      docker_prefix: ${{ github.repository_owner == 'FreeRADIUS' && 'docker.internal.networkradius.com/' || '' }}
     steps:
       - id: skip_check
         uses: fkirc/skip-duplicate-actions@master
@@ -68,10 +69,10 @@ jobs:
         #  docker  - the docker image name, if containers are being used
         #  name    - used in the job name only
         os:
-          - runs_on: "${{ github.repository_owner == 'FreeRADIUS' && 'self-hosted' || 'ubuntu-20.04' }}"
+          - runs_on: "${{ needs.pre-ci.outputs.selfhosted == '1' && 'self-hosted' || 'ubuntu-20.04' }}"
+            docker: "${{ needs.pre-ci.outputs.selfhosted == '1' && 'docker.internal.networkradius.com/self-hosted' || 'ubuntu:20.04' }}"
+            name: "${{ needs.pre-ci.outputs.selfhosted == '1' && 'self' || 'gh' }}-ubuntu20"
             code: "ubuntu2004"
-            docker: "ubuntu:20.04"
-            name: "${{ github.repository_owner == 'FreeRADIUS' && 'self' || 'gh' }}-ubuntu20"
             imageos: "ubuntu20"
 
         env:
@@ -98,7 +99,7 @@ jobs:
     #  we need to run separate database containers to provide these.
     services:
       mariadb:
-        image: mariadb
+        image: ${{ needs.pre-ci.outputs.docker_prefix }}mariadb
         env:
           MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: yes
         ports:
@@ -110,7 +111,7 @@ jobs:
           --health-retries 10
 
       postgres:
-        image: postgres
+        image: ${{ needs.pre-ci.outputs.docker_prefix }}postgres
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
@@ -122,12 +123,12 @@ jobs:
           --health-retries 5
 
       threeds:
-        image: 389ds/dirsrv
+        image: ${{ needs.pre-ci.outputs.docker_prefix }}4teamwork/389ds
         ports:
           - 3389:3389
           - 3636:3636
         options: >-
-          -e DS_SUFFIX_NAME=dc=example,dc=com
+          -e SUFFIX_NAME=dc=example,dc=com
           -e DS_DM_PASSWORD=secret123
           --health-cmd "dsctl localhost healthcheck --check backends:localhost:search"
           --health-interval 10s
@@ -174,6 +175,11 @@ jobs:
           rest_test_server: 127.0.0.1
           rest_test_port: 8080
           rest_test_ssl_port: 8443
+          imap_test_server: 127.0.0.1
+          imap_test_server_port: 1430
+          imap_test_server_ssl_port: 1432
+          smtp_test_server: 127.0.0.1
+          smtp_test_server_port: 2525
 
       - name: Run fuzzer
         uses: ./.github/actions/fuzzer
@@ -314,22 +320,3 @@ jobs:
           USERNAME: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.repository }}
           REPO_KEY: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-
-  post-ci:
-    if: github.repository_owner == 'FreeRADIUS'
-    runs-on: self-hosted
-    name: "Post-job cleanup"
-    needs:
-      - ci
-    steps:
-      - id: cleanup_containers
-        name: "Cleanup docker containers"
-        run: /usr/bin/docker container prune -f || true
-
-      - id: cleanup_volumes
-        name: "Cleanup docker volumes"
-        run: /usr/bin/docker volume prune -f || true
-
-      - id: cleanup_images
-        name: "Cleanup docker images"
-        run: /usr/bin/docker image prune -f || true

@@ -45,15 +45,17 @@ typedef struct {
 
 	rindent_t		indent;				//!< indentation
 
+	void			*env_data;			//!< Expanded per call environment tmpls.
 	/*
 	 *	For func and alternate
 	 */
-	FR_DLIST_HEAD(fr_value_box_list)	out;				//!< Head of the result of a nested
+	fr_value_box_list_t	out;				//!< Head of the result of a nested
 								///< expansion.
 	bool			alternate;			//!< record which alternate branch we
 								///< previously took.
 	xlat_func_t		resume;				//!< called on resume
 	xlat_func_signal_t	signal;				//!< called on signal
+	fr_signal_t		sigmask;			//!< Signals to block
 	void			*rctx;				//!< for resume / signal
 
 	bool			*success;			//!< If set, where to record the result
@@ -117,7 +119,7 @@ static void unlang_xlat_event_timeout_handler(UNUSED fr_event_list_t *el, fr_tim
 	 */
 	ev->timeout(XLAT_CTX(ev->inst->data,
 			     ev->thread->data,
-			     ev->thread->mctx,
+			     ev->thread->mctx, NULL,
 			     UNCONST(void *, ev->rctx)),
 			     ev->request, now);
 
@@ -188,7 +190,7 @@ int unlang_xlat_timeout_add(request_t *request,
  *	- 0 on success.
  *	- -1 on failure.
  */
-static int unlang_xlat_push_internal(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_HEAD(fr_value_box_list) *out,
+static int unlang_xlat_push_internal(TALLOC_CTX *ctx, bool *p_success, fr_value_box_list_t *out,
 				     request_t *request, xlat_exp_head_t const *xlat, xlat_exp_t *node, bool top_frame)
 {
 	/** Static instruction for performing xlat evaluations
@@ -271,7 +273,7 @@ static int unlang_xlat_push_internal(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_
  *	- 0 on success.
  *	- -1 on failure.
  */
-int unlang_xlat_push(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_HEAD(fr_value_box_list) *out,
+int unlang_xlat_push(TALLOC_CTX *ctx, bool *p_success, fr_value_box_list_t *out,
 		     request_t *request, xlat_exp_head_t const *xlat, bool top_frame)
 {
 	(void) talloc_get_type_abort_const(xlat, xlat_exp_head_t);
@@ -291,7 +293,7 @@ int unlang_xlat_push(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_HEAD(fr_value_bo
  *	- 0 on success.
  *	- -1 on failure.
  */
-int unlang_xlat_push_node(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_HEAD(fr_value_box_list) *out,
+int unlang_xlat_push_node(TALLOC_CTX *ctx, bool *p_success, fr_value_box_list_t *out,
 			  request_t *request, xlat_exp_t *node)
 {
 	return unlang_xlat_push_internal(ctx, p_success, out, request, NULL, node, UNLANG_TOP_FRAME);
@@ -303,8 +305,28 @@ static unlang_action_t unlang_xlat_repeat(rlm_rcode_t *p_result, request_t *requ
 	xlat_action_t			xa;
 	xlat_exp_head_t const		*child = NULL;
 
+	/*
+	 *	If the xlat is a function with a method_env, expand it before calling the function.
+	 */
+	if ((state->exp->type == XLAT_FUNC) && state->exp->call.func->call_env && !state->env_data) {
+		unlang_action_t ua = call_env_expand(state, request, &state->env_data,
+						     state->exp->call.func->call_env,
+						     &state->exp->call.inst->call_env_parsed);
+		switch (ua) {
+		case UNLANG_ACTION_FAIL:
+			goto fail;
+
+		case UNLANG_ACTION_PUSHED_CHILD:
+			frame_repeat(frame, unlang_xlat_repeat);
+			return UNLANG_ACTION_PUSHED_CHILD;
+
+		default:
+			break;
+		}
+	}
+
 	xa = xlat_frame_eval_repeat(state->ctx, &state->values, &child,
-				    &state->alternate, request, state->head, &state->exp, &state->out);
+				    &state->alternate, request, state->head, &state->exp, state->env_data, &state->out);
 	switch (xa) {
 	case XLAT_ACTION_PUSH_CHILD:
 		fr_assert(child);
@@ -431,7 +453,7 @@ static unlang_action_t unlang_xlat(rlm_rcode_t *p_result, request_t *request, un
  * @param[in] frame		The current stack frame.
  * @param[in] action		What the request should do (the type of signal).
  */
-static void unlang_xlat_signal(request_t *request, unlang_stack_frame_t *frame, fr_state_signal_t action)
+static void unlang_xlat_signal(request_t *request, unlang_stack_frame_t *frame, fr_signal_t action)
 {
 	unlang_frame_state_xlat_t	*state = talloc_get_type_abort(frame->state, unlang_frame_state_xlat_t);
 
@@ -442,7 +464,7 @@ static void unlang_xlat_signal(request_t *request, unlang_stack_frame_t *frame, 
 		TALLOC_FREE(state->event_ctx);
 	}
 
-	if (!state->signal) return;
+	if (!state->signal || (state->sigmask & action)) return;
 
 	xlat_signal(state->signal, state->exp, request, state->rctx, action);
 }
@@ -535,11 +557,12 @@ static unlang_action_t unlang_xlat_resume(rlm_rcode_t *p_result, request_t *requ
  * @param[in] request		The current request.
  * @param[in] resume		Called on unlang_interpret_mark_runnable().
  * @param[in] signal		Called on unlang_action().
+ * @param[in] sigmask		Signals to block.
  * @param[in] rctx		to pass to the callbacks.
  * @return always returns XLAT_ACTION_YIELD
  */
 xlat_action_t unlang_xlat_yield(request_t *request,
-				xlat_func_t resume, xlat_func_signal_t signal,
+				xlat_func_t resume, xlat_func_signal_t signal, fr_signal_t sigmask,
 				void *rctx)
 {
 	unlang_stack_t			*stack = request->stack;
@@ -553,6 +576,7 @@ xlat_action_t unlang_xlat_yield(request_t *request,
 	 */
 	state->resume = resume;
 	state->signal = signal;
+	state->sigmask = sigmask;
 	state->rctx = rctx;
 
 	return XLAT_ACTION_YIELD;

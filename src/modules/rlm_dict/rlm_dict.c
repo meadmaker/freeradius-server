@@ -26,6 +26,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 static xlat_arg_parser_t const xlat_dict_attr_by_num_args[] = {
 	{ .required = true, .single = true, .type = FR_TYPE_UINT32 },
@@ -38,7 +39,7 @@ static xlat_arg_parser_t const xlat_dict_attr_by_num_args[] = {
  */
 static xlat_action_t xlat_dict_attr_by_num(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					   UNUSED xlat_ctx_t const *xctx,
-					   request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					   request_t *request, fr_value_box_list_t *in)
 {
 	fr_dict_attr_t const	*da;
 	fr_value_box_t		*attr = fr_value_box_list_head(in);
@@ -72,7 +73,7 @@ static xlat_arg_parser_t const xlat_dict_attr_by_oid_args[] = {
  */
 static xlat_action_t xlat_dict_attr_by_oid(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					   UNUSED xlat_ctx_t const *xctx,
-					   request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					   request_t *request, fr_value_box_list_t *in)
 {
 	unsigned int		attr = 0;
 	fr_dict_attr_t const	*parent = fr_dict_root(request->dict);
@@ -111,7 +112,7 @@ static xlat_arg_parser_t const xlat_vendor_args[] = {
  */
 static xlat_action_t xlat_vendor(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 UNUSED xlat_ctx_t const *xctx,
-				 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				 request_t *request, fr_value_box_list_t *in)
 {
 	fr_pair_t		*vp;
 	fr_dict_vendor_t const	*vendor;
@@ -145,7 +146,7 @@ static xlat_arg_parser_t const xlat_vendor_num_args[] = {
  */
 static xlat_action_t xlat_vendor_num(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				     UNUSED xlat_ctx_t const *xctx,
-				     request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				     request_t *request, fr_value_box_list_t *in)
 {
 	fr_pair_t	*vp;
 	fr_value_box_t	*attr = fr_value_box_list_head(in);
@@ -170,7 +171,7 @@ static xlat_arg_parser_t const xlat_attr_args[] = {
  */
 static xlat_action_t xlat_attr(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			       UNUSED xlat_ctx_t const *xctx,
-			       request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			       request_t *request, fr_value_box_list_t *in)
 {
 	fr_pair_t	*vp;
 	fr_value_box_t	*attr = fr_value_box_list_head(in);
@@ -200,7 +201,7 @@ static xlat_arg_parser_t const xlat_attr_num_args[] = {
  */
 static xlat_action_t xlat_attr_num(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				   UNUSED xlat_ctx_t const *xctx,
-				   request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				   request_t *request, fr_value_box_list_t *in)
 {
 	fr_pair_t	*vp;
 	fr_value_box_t	*attr = fr_value_box_list_head(in);
@@ -215,41 +216,32 @@ static xlat_action_t xlat_attr_num(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	return XLAT_ACTION_DONE;
 }
 
-/*
- *	Do any per-module initialization that is separate to each
- *	configured instance of the module.  e.g. set up connections
- *	to external databases, read configuration files, set up
- *	dictionary entries, etc.
- *
- *	If configuration information is given in the config section
- *	that must be referenced in later calls, store a handle to it
- *	in *instance otherwise put a null pointer there.
- */
-static int mod_bootstrap(module_inst_ctx_t const *mctx)
-{
-	void *inst = mctx->inst->data;
+#define XLAT_REGISTER(_name, _func, _type, _args) \
+if (unlikely(!(xlat = xlat_func_register(NULL, _name, _func, _type)))) return -1; \
+xlat_func_args_set(xlat, _args)
 
+static int mod_load(void)
+{
 	xlat_t	*xlat;
 
-	/*
-	 *	Only register these xlats for the first instance of the dictionary module.
-	 */
-	if (cf_section_name2(mctx->inst->conf) != NULL) return 0;
-
-	xlat = xlat_register_module(inst, mctx, "attr_by_num", xlat_dict_attr_by_num, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, xlat_dict_attr_by_num_args);
-	xlat = xlat_register_module(inst, mctx, "attr_by_oid", xlat_dict_attr_by_oid, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, xlat_dict_attr_by_oid_args);
-	xlat = xlat_register_module(inst, mctx, "vendor", xlat_vendor, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, xlat_vendor_args);
-	xlat = xlat_register_module(inst, mctx, "vendor_num", xlat_vendor_num, FR_TYPE_UINT32, NULL);
-	xlat_func_args(xlat, xlat_vendor_num_args);
-	xlat = xlat_register_module(inst, mctx, "attr", xlat_attr, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, xlat_attr_args);
-	xlat = xlat_register_module(inst, mctx, "attr_num", xlat_attr_num, FR_TYPE_UINT32, NULL);
-	xlat_func_args(xlat, xlat_attr_num_args);
+	XLAT_REGISTER("attr_by_num", xlat_dict_attr_by_num, FR_TYPE_STRING, xlat_dict_attr_by_num_args);
+	XLAT_REGISTER("attr_by_oid", xlat_dict_attr_by_oid, FR_TYPE_STRING, xlat_dict_attr_by_oid_args);
+	XLAT_REGISTER("vendor", xlat_vendor, FR_TYPE_STRING, xlat_vendor_args);
+	XLAT_REGISTER("vendor_num", xlat_vendor_num, FR_TYPE_UINT32, xlat_vendor_num_args);
+	XLAT_REGISTER("attr", xlat_attr, FR_TYPE_STRING, xlat_attr_args);
+	XLAT_REGISTER("attr_num", xlat_attr_num, FR_TYPE_UINT32, xlat_attr_num_args);
 
 	return 0;
+}
+
+static void mod_unload(void)
+{
+	xlat_func_unregister("attr_by_num");
+	xlat_func_unregister("attr_by_oid");
+	xlat_func_unregister("vendor");
+	xlat_func_unregister("vendor_num");
+	xlat_func_unregister("attr");
+	xlat_func_unregister("attr_num");
 }
 
 extern module_rlm_t rlm_dict;
@@ -257,6 +249,7 @@ module_rlm_t rlm_dict = {
 	.common = {
 		.magic		= MODULE_MAGIC_INIT,
 		.name		= "dict",
-		.bootstrap	= mod_bootstrap
+		.onload		= mod_load,
+		.unload		= mod_unload
 	}
 };

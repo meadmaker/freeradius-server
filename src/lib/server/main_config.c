@@ -23,6 +23,7 @@
  * @copyright 2002,2006-2007 The FreeRADIUS server project
  * @copyright 2002 Alan DeKok (aland@freeradius.org)
  */
+#include "lib/unlang/xlat.h"
 RCSID("$Id$")
 
 #include <freeradius-devel/server/cf_file.h>
@@ -43,6 +44,8 @@ RCSID("$Id$")
 #include <freeradius-devel/util/hw.h>
 #include <freeradius-devel/util/perm.h>
 #include <freeradius-devel/util/sem.h>
+
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include <sys/stat.h>
 #include <pwd.h>
@@ -180,9 +183,7 @@ static const CONF_PARSER thread_config[] = {
 static const CONF_PARSER migrate_config[] = {
 	{ FR_CONF_OFFSET("unflatten_after_decode", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, unflatten_after_decode) },
 	{ FR_CONF_OFFSET("unflatten_before_encode", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, unflatten_before_encode) },
-	{ FR_CONF_OFFSET("flatten_before_encode", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, flatten_before_encode) },
 	{ FR_CONF_OFFSET("tmpl_tokenize_all_nested", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, tmpl_tokenize_all_nested) },
-	{ FR_CONF_OFFSET("parse_new_conditions", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, parse_new_conditions) },
 	{ FR_CONF_OFFSET("use_new_conditions", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, use_new_conditions) },
 	{ FR_CONF_OFFSET("rewrite_update", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, rewrite_update) },
 	{ FR_CONF_OFFSET("forbid_update", FR_TYPE_BOOL | FR_TYPE_HIDDEN, main_config_t, forbid_update) },
@@ -540,7 +541,7 @@ static xlat_arg_parser_t const xlat_config_args[] = {
  */
 static xlat_action_t xlat_config(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 UNUSED xlat_ctx_t const *xctx,
-				 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				 request_t *request, fr_value_box_list_t *in)
 {
 	char const	*value;
 	CONF_PAIR	*cp;
@@ -1017,9 +1018,10 @@ int main_config_init(main_config_t *config)
 	xlat_t		*xlat;
 
 	/*
-	 *	Initialize the xlats before we load the configuration files, so that we can later call xlat_register().
+	 *	Initialize the xlats before we load the configuration files,
+	 *	so that we can later call xlat_func_register().
 	 */
-	xlat_init();
+	xlat_func_init();
 
 	if (stat(config->raddb_dir, &statbuf) < 0) {
 		ERROR("Error checking raddb_dir \"%s\": %s", config->raddb_dir, fr_syserror(errno));
@@ -1364,8 +1366,9 @@ do {\
 	/*
 	 *	Register the %(config:section.subsection) xlat function.
 	 */
-	xlat = xlat_register(NULL, "config", xlat_config, FR_TYPE_STRING, XLAT_FLAG_PURE);
-	xlat_func_args(xlat, xlat_config_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "config", xlat_config, FR_TYPE_STRING)) == NULL)) goto failure;
+	xlat_func_args_set(xlat, xlat_config_args);
+	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
 	/*
 	 *	Ensure cwd is inside the chroot.
@@ -1457,7 +1460,6 @@ void main_config_hup(main_config_t *config)
 }
 
 static fr_table_num_ordered_t config_arg_table[] = {
-	{ L("parse_new_conditions"),	 offsetof(main_config_t, parse_new_conditions) },
 	{ L("use_new_conditions"),	 offsetof(main_config_t, use_new_conditions) },
 	{ L("tmpl_tokenize_all_nested"), offsetof(main_config_t, tmpl_tokenize_all_nested) },
 	{ L("rewrite_update"),		 offsetof(main_config_t, rewrite_update) },

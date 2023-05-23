@@ -412,7 +412,7 @@ RECV(for_any_server)
 
 	return unlang_module_yield_to_section(p_result, request,
 					      cs, state->rcode, state->resume,
-					      NULL, rctx);
+					      NULL, 0, rctx);
 }
 
 /** Validate a request/renew/decline/release
@@ -447,7 +447,7 @@ RECV(for_this_server)
 
 	return unlang_module_yield_to_section(p_result, request,
 					      cs, state->rcode, state->resume,
-					      NULL, rctx);
+					      NULL, 0, rctx);
 }
 
 /** Copy a reply pair back into the response
@@ -673,7 +673,7 @@ RECV(from_relay)
 
 	return unlang_module_yield_to_section(p_result, request,
 					      cs, state->rcode, state->resume,
-					      NULL, rctx);
+					      NULL, 0, rctx);
 }
 
 /** Restore our copy of the header fields into the reply list
@@ -741,7 +741,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
 	process_dhcpv6_t	*inst = talloc_get_type_abort(mctx->inst->data, process_dhcpv6_t);
 
-	inst->server_cs = cf_section_find_in_parent(mctx->inst->conf, "server", CF_IDENT_ANY);
+	inst->server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
 
 	return 0;
 }

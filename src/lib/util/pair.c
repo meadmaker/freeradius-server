@@ -40,6 +40,8 @@ FR_TLIST_FUNCS(fr_pair_order_list, fr_pair_t, order_entry)
 /** Initialise a pair list header
  *
  * @param[in,out] list to initialise
+ *
+ * @hidecallergraph
  */
 void fr_pair_list_init(fr_pair_list_t *list)
 {
@@ -188,12 +190,14 @@ static inline CC_HINT(always_inline) void pair_init_from_da(fr_pair_t *vp, fr_di
 		 *	Make it very obvious if we failed
 		 *	to initialise something.
 		 */
+		/* coverity[store_writes_const_field] */
 		memset(&vp->data, 0xff, sizeof(vp->data));
 #endif
 
 		/*
 		 *	Hack around const issues...
 		 */
+		/* coverity[store_writes_const_field] */
 		memcpy(UNCONST(fr_type_t *, &vp->vp_type), &da->type, sizeof(vp->vp_type));
 		fr_pair_list_init(&vp->vp_group);
 		vp->vp_group.is_child = true;
@@ -989,7 +993,7 @@ static int _pair_list_dcursor_insert(fr_dlist_head_t *list, void *to_insert, UNU
 	return 0;
 }
 
-/** Keep attr tree and sublists synced on cursor insert
+/** Keep attr tree and sublists synced on cursor removal
  *
  * @param[in] list	Underlying order list from the fr_pair_list_t.
  * @param[in] to_remove	fr_pair_t being removed.
@@ -1000,13 +1004,20 @@ static int _pair_list_dcursor_insert(fr_dlist_head_t *list, void *to_insert, UNU
 static int _pair_list_dcursor_remove(NDEBUG_UNUSED fr_dlist_head_t *list, void *to_remove, UNUSED void *uctx)
 {
 	fr_pair_t *vp = to_remove;
+	fr_pair_list_t *parent = fr_pair_parent_list(vp);
 
 #ifndef NDEBUG
 	fr_tlist_head_t *tlist;
 
 	tlist = fr_tlist_head_from_dlist(list);
 
+	while (parent && (tlist != vp->order_entry.entry.list_head)) {
+		tlist = &parent->order.head;
+		parent = fr_pair_parent_list(fr_pair_list_parent(parent));
+	}
+
 	fr_assert(vp->order_entry.entry.list_head == tlist);
+	parent = fr_pair_parent_list(vp);
 #endif
 
 	/*
@@ -1016,7 +1027,10 @@ static int _pair_list_dcursor_remove(NDEBUG_UNUSED fr_dlist_head_t *list, void *
 
 	PAIR_VERIFY(vp);
 
-	return 0;
+	if (&parent->order.head.dlist_head == list) return 0;
+
+	fr_pair_remove(parent, vp);
+	return 1;
 }
 
 /** Initialises a special dcursor with callbacks that will maintain the attr sublists correctly
@@ -1153,6 +1167,7 @@ static fr_dlist_head_t value_dlist = {
  * Filters can be applied later with fr_dcursor_filter_set.
  *
  * @note This is the only way to use a dcursor in non-const mode with fr_pair_list_t.
+ * @note - the list cannot be modified, and structural attributes are not returned.
  *
  * @param[out] cursor	to initialise.
  * @return
@@ -1201,6 +1216,8 @@ static void *_fr_pair_iter_next_dcursor_value(UNUSED fr_dlist_head_t *list, void
  *
  * Filters can be applied later with fr_dcursor_filter_set.
  *
+ * @note - the list cannot be modified, and structural attributes are not returned.
+  *
  * @param[out] cursor	to initialise.
  * @param[in] parent	to iterate over
  * @return
@@ -1246,6 +1263,8 @@ int fr_pair_prepend(fr_pair_list_t *list, fr_pair_t *to_add)
  * @return
  *	- 0 on success.
  *	- -1 on failure (pair already in list).
+ *
+ * @hidecallergraph
  */
 int fr_pair_append(fr_pair_list_t *list, fr_pair_t *to_add)
 {
@@ -1321,8 +1340,8 @@ int fr_pair_insert_before(fr_pair_list_t *list, fr_pair_t *pos, fr_pair_t *to_ad
  *
  * @note Memory used by the VP being replaced will be freed.
  *
- * @param[in,out] list		pair list containing #to_replace.
- * @param[in] to_replace	pair to replace and free
+ * @param[in,out] list		pair list
+ * @param[in] to_replace	pair to replace and free, on list
  * @param[in] vp		New pair to insert.
  */
 void fr_pair_replace(fr_pair_list_t *list, fr_pair_t *to_replace, fr_pair_t *vp)
@@ -1460,42 +1479,78 @@ int fr_pair_append_by_da_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t
 
 /** Return the first fr_pair_t matching the #fr_dict_attr_t or alloc a new fr_pair_t (and append)
  *
- * @param[in] ctx	to allocate any new #fr_pair_t in.
+ * @param[in] parent	to search for attributes in or append attributes to
  * @param[out] out	Pair we allocated or found.  May be NULL if the caller doesn't
  *			care about manipulating the fr_pair_t.
- * @param[in,out] list	to search for attributes in or append attributes to.
  * @param[in] da	of attribute to locate or alloc.
- * @param[in] n		update the n'th instance of this da.
- *			Note: If we can't find the n'th instance the attribute created
- *			won't necessarily be at index n.  So use cases for this are
- *			limited .
  * @return
  *	- 1 if attribute already existed.
  *	- 0 if we allocated a new attribute.
  *	- -1 on failure.
  */
-int fr_pair_update_by_da(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t *list,
-			 fr_dict_attr_t const *da, unsigned int n)
+int fr_pair_update_by_da_parent(fr_pair_t *parent, fr_pair_t **out,
+				fr_dict_attr_t const *da)
 {
-	fr_pair_t	*vp;
+	fr_pair_t		*vp = NULL;
+	fr_da_stack_t		da_stack;
+	fr_dict_attr_t const	**find;
+	TALLOC_CTX		*pair_ctx = parent;
+	fr_pair_list_t		*list = &parent->vp_group;
 
-	vp = fr_pair_find_by_da_idx(list, da, n);
-	if (vp) {
-		PAIR_VERIFY_WITH_LIST(list, vp);
-		if (out) *out = vp;
-		return 1;
+	/*
+	 *	Fast path for non-nested attributes
+	 */
+	if (da->depth <= 1) {
+		vp = fr_pair_find_by_da(list, NULL, da);
+		if (vp) {
+			*out = vp;
+			return 1;
+		}
+
+		return fr_pair_append_by_da(parent, out, list, da);
 	}
 
-	vp = fr_pair_afrom_da(ctx, da);
-	if (unlikely(!vp)) {
-		if (out) *out = NULL;
-		return -1;
+	fr_proto_da_stack_build(&da_stack, da);
+	find = &da_stack.da[0];
+
+	/*
+	 *	Walk down the da stack looking for candidate parent
+	 *	attributes and then allocating the leaf.
+	 */
+	while (true) {
+		fr_assert((*find)->depth <= da->depth);
+
+		/*
+		 *	We're not at the leaf, look for a potential parent
+		 */
+		if ((*find) != da) vp = fr_pair_find_by_da(list, NULL, *find);
+
+		/*
+		 *	Nothing found, create the pair
+		 */
+		if (!vp) {
+			if (fr_pair_append_by_da(pair_ctx, &vp, list, *find) < 0) {
+				*out = NULL;
+				return -1;
+			}
+		}
+
+		/*
+		 *	We're at the leaf, return
+		 */
+		if ((*find) == da) {
+			*out = vp;
+			return 0;
+		}
+
+		/*
+		 *	Prepare for next level
+		 */
+		list = &vp->vp_group;
+		pair_ctx = vp;
+		vp = NULL;
+		find++;
 	}
-
-	fr_pair_append(list, vp);
-	if (out) *out = vp;
-
-	return 0;
 }
 
 /** Delete matching pairs from the specified list
@@ -2969,6 +3024,12 @@ void fr_pair_verify(char const *file, int line, fr_pair_list_t const *list, fr_p
 					    vp, talloc_get_name(vp),
 					    parent, talloc_get_name(parent));
 
+			/*
+			 *	@todo - uncomment this once we fully support nested structures.
+			 *
+			 *	Right now the "flat" nature of attributes prevents this check from working.
+			 */
+//			fr_assert(fr_dict_attr_can_contain(vp->da, child->da));
 			fr_pair_verify(file, line, &vp->vp_group, child);
 		}
 	}

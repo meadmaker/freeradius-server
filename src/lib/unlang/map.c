@@ -48,8 +48,8 @@ typedef struct {
 
 	fr_dlist_head_t		vlm_head;			//!< Head of list of VP List Mod.
 
-	FR_DLIST_HEAD(fr_value_box_list)	lhs_result;			//!< Result of expanding the LHS
-	FR_DLIST_HEAD(fr_value_box_list)	rhs_result;			//!< Result of expanding the RHS.
+	fr_value_box_list_t	lhs_result;			//!< Result of expanding the LHS
+	fr_value_box_list_t	rhs_result;			//!< Result of expanding the RHS.
 
 	unlang_update_state_t	state;				//!< What we're currently doing.
 } unlang_frame_state_update_t;
@@ -58,7 +58,7 @@ typedef struct {
  *
  */
 typedef struct {
-	FR_DLIST_HEAD(fr_value_box_list)	src_result;			//!< Result of expanding the map source.
+	fr_value_box_list_t	src_result;			//!< Result of expanding the map source.
 } unlang_frame_state_map_proc_t;
 
 /** Apply a list of modifications on one or more fr_pair_t lists.
@@ -283,6 +283,13 @@ static unlang_action_t unlang_update_state_init(rlm_rcode_t *p_result, request_t
 	return list_mod_create(p_result, request, frame);
 }
 
+static unlang_action_t map_proc_resume(UNUSED rlm_rcode_t *p_result, UNUSED request_t *request,
+				       unlang_stack_frame_t *frame)
+{
+	unlang_frame_state_map_proc_t	*map_proc_state = talloc_get_type_abort(frame->state, unlang_frame_state_map_proc_t);
+	VALUE_BOX_LIST_VERIFY(&map_proc_state->src_result);
+	return UNLANG_ACTION_CALCULATE_RESULT;
+}
 
 static unlang_action_t map_proc_apply(rlm_rcode_t *p_result, request_t *request, unlang_stack_frame_t *frame)
 {
@@ -294,14 +301,9 @@ static unlang_action_t map_proc_apply(rlm_rcode_t *p_result, request_t *request,
 
 	RDEBUG2("MAP %s \"%pM\"", inst->proc->name, &map_proc_state->src_result);
 
-	/*
-	 *	FIXME - We don't yet support async LHS/RHS expansions for map procs
-	 */
-	fr_value_box_list_verify(&map_proc_state->src_result);
-	*p_result = map_proc(request, gext->proc_inst, &map_proc_state->src_result);
-	fr_value_box_list_verify(&map_proc_state->src_result);
-
-	return UNLANG_ACTION_CALCULATE_RESULT;
+	VALUE_BOX_LIST_VERIFY(&map_proc_state->src_result);
+	frame_repeat(frame, map_proc_resume);
+	return map_proc(p_result, request, gext->proc_inst, &map_proc_state->src_result);
 }
 
 static unlang_action_t unlang_map_state_init(rlm_rcode_t *p_result, request_t *request, unlang_stack_frame_t *frame)

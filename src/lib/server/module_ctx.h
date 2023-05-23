@@ -18,7 +18,7 @@
 /**
  * $Id$
  *
- * @file lib/server/module_call_ctx.h
+ * @file lib/server/module_ctx.h
  * @brief Temporary argument structures for module calls.
  *
  * These get used in various places where we may not want to include
@@ -41,6 +41,7 @@ extern "C" {
 typedef struct {
 	dl_module_inst_t const		*inst;		//!< Dynamic loader API handle for the module.
 	void				*thread;	//!< Thread specific instance data.
+	void				*env_data;	//!< Per call enviornment data.
 	void				*rctx;		//!< Resume ctx that a module previously set.
 } module_ctx_t;
 
@@ -116,9 +117,10 @@ DIAG_ON(unused-function)
  *
  * @param[in] _dl_inst	of the module being called.
  * @param[in] _thread 	instance of the module being called.
+ * @param[in] _env_data	Call environment data.
  * @param[in] _rctx	Resume ctx (if any).
  */
-#define MODULE_CTX(_dl_inst, _thread, _rctx) &(module_ctx_t){ .inst = _dl_inst, .thread = _thread, .rctx = _rctx }
+#define MODULE_CTX(_dl_inst, _thread, _env_data, _rctx) &(module_ctx_t){ .inst = _dl_inst, .thread = _thread, .env_data = _env_data, .rctx = _rctx }
 
 /** Wrapper to create a module_ctx_t as a compound literal from a module_inst_ctx_t
  *
@@ -138,7 +140,7 @@ DIAG_ON(unused-function)
  *
  * @param[in] _mctx	to copy fields from.
  */
-#define MODULE_CTX_FROM_THREAD_INST(_mctx) &(module_ctx_t){ .inst = (_mctx)->inst, .thread = (_mctx)->thread }
+#define MODULE_CTX_FROM_THREAD_INST(_mctx) &(module_ctx_t){ .inst = (_mctx)->inst, .thread = (_mctx)->thread, .env_data = (_mctx)->env_data }
 
 /** Wrapper to create a module_inst_ctx_t as a compound literal
  *

@@ -25,6 +25,8 @@
  */
 
 #include <freeradius-devel/server/base.h>
+#include <freeradius-devel/unlang/xlat_func.h>
+
 #include "base.h"
 #include "attrs.h"
 
@@ -47,7 +49,7 @@ static xlat_arg_parser_t const aka_sim_xlat_id_method_xlat_args[] = {
 static xlat_action_t aka_sim_xlat_id_method_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 						 UNUSED xlat_ctx_t const *xctx,
 						 request_t *request,
-						 FR_DLIST_HEAD(fr_value_box_list) *in)
+						 fr_value_box_list_t *in)
 {
 	char const			*method;
 	fr_aka_sim_id_type_t		type_hint;
@@ -103,7 +105,7 @@ static xlat_arg_parser_t const aka_sim_xlat_id_type_xlat_args[] = {
  */
 static xlat_action_t aka_sim_xlat_id_type_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					       UNUSED xlat_ctx_t const *xctx,
-					       request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					       request_t *request, fr_value_box_list_t *in)
 {
 	char const			*type;
 	fr_aka_sim_id_type_t		type_hint;
@@ -159,7 +161,7 @@ static xlat_arg_parser_t const aka_sim_id_3gpp_temporary_id_key_index_xlat_args[
  */
 static xlat_action_t aka_sim_id_3gpp_temporary_id_key_index_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 						 		 UNUSED xlat_ctx_t const *xctx,
-								 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+								 request_t *request, fr_value_box_list_t *in)
 {
 	fr_value_box_t	*id = fr_value_box_list_head(in);
 	fr_value_box_t	*vb;
@@ -179,11 +181,11 @@ static xlat_action_t aka_sim_id_3gpp_temporary_id_key_index_xlat(TALLOC_CTX *ctx
 
 extern xlat_arg_parser_t aka_sim_3gpp_temporary_id_decrypt_xlat_args[];
 xlat_arg_parser_t aka_sim_3gpp_temporary_id_decrypt_xlat_args[] = {
-	{ .required = true, .concat = true, .single = false, .variadic = false, .type = FR_TYPE_STRING,
+	{ .required = true, .concat = true, .single = false, .type = FR_TYPE_STRING,
 	  .func = NULL, .uctx = NULL },
-	{ .required = true, .concat = true, .single = false, .variadic = false, .type = FR_TYPE_OCTETS,
+	{ .required = true, .concat = true, .single = false, .type = FR_TYPE_OCTETS,
 	  .func = NULL, .uctx = NULL },
-	{ .required = false, .concat = false, .single = true, .variadic = false, .type = FR_TYPE_BOOL,
+	{ .required = false, .concat = false, .single = true, .type = FR_TYPE_BOOL,
 	  .func = NULL, .uctx = NULL },
 	XLAT_ARG_PARSER_TERMINATOR
 };
@@ -224,7 +226,7 @@ xlat_arg_parser_t aka_sim_3gpp_temporary_id_decrypt_xlat_args[] = {
  */
 static xlat_action_t aka_sim_3gpp_temporary_id_decrypt_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 						 	    UNUSED xlat_ctx_t const *xctx,
-							    request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+							    request_t *request, fr_value_box_list_t *in)
 {
 	uint8_t		tag;
 	char		out_tag = '\0', *buff;
@@ -325,10 +327,10 @@ static xlat_action_t aka_sim_3gpp_temporary_id_decrypt_xlat(TALLOC_CTX *ctx, fr_
 
 extern xlat_arg_parser_t aka_sim_3gpp_temporary_id_encrypt_xlat_args[];
 xlat_arg_parser_t aka_sim_3gpp_temporary_id_encrypt_xlat_args[] = {
-	{ .required = true, .concat = true, .single = false, .variadic = false, .type = FR_TYPE_STRING	},
-	{ .required = true, .concat = true, .single = false, .variadic = false, .type = FR_TYPE_OCTETS	},
-	{ .required = true, .concat = false, .single = true, .variadic = false, .type = FR_TYPE_UINT8	},
-	{ .required = false, .concat = false, .single = true, .variadic = false, .type = FR_TYPE_STRING	},
+	{ .required = true, .concat = true, .single = false, .type = FR_TYPE_STRING	},
+	{ .required = true, .concat = true, .single = false, .type = FR_TYPE_OCTETS	},
+	{ .required = true, .concat = false, .single = true, .type = FR_TYPE_UINT8	},
+	{ .required = false, .concat = false, .single = true, .type = FR_TYPE_STRING	},
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -342,7 +344,7 @@ xlat_arg_parser_t aka_sim_3gpp_temporary_id_encrypt_xlat_args[] = {
  */
 static xlat_action_t aka_sim_3gpp_temporary_id_encrypt_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 							    UNUSED xlat_ctx_t const *xctx,
-							    request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+							    request_t *request, fr_value_box_list_t *in)
 {
 	char				encrypted[AKA_SIM_3GPP_PSEUDONYM_LEN + 1];
 	uint8_t				tag = 0;
@@ -494,39 +496,41 @@ static xlat_action_t aka_sim_3gpp_temporary_id_encrypt_xlat(TALLOC_CTX *ctx, fr_
 	return XLAT_ACTION_DONE;
 }
 
-void fr_aka_sim_xlat_register(void)
+int fr_aka_sim_xlat_func_register(void)
 {
 	xlat_t	*xlat;
 
 	if (aka_sim_xlat_refs) {
 		aka_sim_xlat_refs++;
-		return;
+		return 0;
 	}
 
-	xlat = xlat_register(NULL, "aka_sim_id_method", aka_sim_xlat_id_method_xlat, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, aka_sim_xlat_id_method_xlat_args);
-	xlat = xlat_register(NULL, "aka_sim_id_type", aka_sim_xlat_id_type_xlat, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, aka_sim_xlat_id_type_xlat_args);
-	xlat = xlat_register(NULL, "3gpp_temporary_id_key_index", aka_sim_id_3gpp_temporary_id_key_index_xlat, FR_TYPE_UINT8, NULL);
-	xlat_func_args(xlat, aka_sim_id_3gpp_temporary_id_key_index_xlat_args);
-	xlat = xlat_register(NULL, "3gpp_temporary_id_decrypt", aka_sim_3gpp_temporary_id_decrypt_xlat, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, aka_sim_3gpp_temporary_id_decrypt_xlat_args);
-	xlat = xlat_register(NULL, "3gpp_temporary_id_encrypt", aka_sim_3gpp_temporary_id_encrypt_xlat, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, aka_sim_3gpp_temporary_id_encrypt_xlat_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "aka_sim_id_method", aka_sim_xlat_id_method_xlat, FR_TYPE_STRING)) == NULL)) return -1;
+	xlat_func_args_set(xlat, aka_sim_xlat_id_method_xlat_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "aka_sim_id_type", aka_sim_xlat_id_type_xlat, FR_TYPE_STRING)) == NULL)) return -1;
+	xlat_func_args_set(xlat, aka_sim_xlat_id_type_xlat_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "3gpp_temporary_id_key_index", aka_sim_id_3gpp_temporary_id_key_index_xlat, FR_TYPE_UINT8)) == NULL)) return -1;
+	xlat_func_args_set(xlat, aka_sim_id_3gpp_temporary_id_key_index_xlat_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "3gpp_temporary_id_decrypt", aka_sim_3gpp_temporary_id_decrypt_xlat, FR_TYPE_STRING)) == NULL)) return -1;
+	xlat_func_args_set(xlat, aka_sim_3gpp_temporary_id_decrypt_xlat_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "3gpp_temporary_id_encrypt", aka_sim_3gpp_temporary_id_encrypt_xlat, FR_TYPE_STRING)) == NULL)) return -1;
+	xlat_func_args_set(xlat, aka_sim_3gpp_temporary_id_encrypt_xlat_args);
 	aka_sim_xlat_refs = 1;
+
+	return 0;
 }
 
-void fr_aka_sim_xlat_unregister(void)
+void fr_aka_sim_xlat_func_unregister(void)
 {
 	if (aka_sim_xlat_refs > 1) {
 		aka_sim_xlat_refs--;
 		return;
 	}
 
-	xlat_unregister("aka_sim_id_method");
-	xlat_unregister("aka_sim_id_type");
-	xlat_unregister("3gpp_pseudonym_key_index");
-	xlat_unregister("3gpp_pseudonym_decrypt");
-	xlat_unregister("3gpp_pseudonym_encrypt");
+	xlat_func_unregister("aka_sim_id_method");
+	xlat_func_unregister("aka_sim_id_type");
+	xlat_func_unregister("3gpp_pseudonym_key_index");
+	xlat_func_unregister("3gpp_pseudonym_decrypt");
+	xlat_func_unregister("3gpp_pseudonym_encrypt");
 	aka_sim_xlat_refs = 0;
 }

@@ -55,15 +55,15 @@ endif
 #  'configure' was not run?  Get the version number from the file.
 #
 ifeq "$(RADIUSD_VERSION)" ""
-  RADIUSD_VERSION_MAJOR := $(shell cat VERSION | cut -f1 -d.)
-  RADIUSD_VERSION_MINOR := $(shell cat VERSION | cut -f2 -d.)
+  RADIUSD_VERSION_MAJOR := $(shell ./version.sh major)
+  RADIUSD_VERSION_MINOR := $(shell ./version.sh minor)
 
   # Default to an incremental version of 0 if we're not building from git
-  RADIUSD_VERSION_INCRM := $(shell git status > /dev/null 2>&1 && git describe --tags --match 'branch_*' --match 'release_*' | cut -d '-' -f 2)
+  RADIUSD_VERSION_INCRM := $(shell ./version.sh commit_depth)
 endif
 
 ifeq "$(RADIUSD_VERSION_INCRM)" ""
-  RADIUSD_VERSION_INCRM := $(shell cat VERSION | cut -d '.' -f 3)
+  RADIUSD_VERSION_INCRM := $(shell ./version.sh incrm)
   PKG_VERSION_SUFFIX :=
   ifeq "$(RADIUSD_VERSION_INCRM)" ""
     RADIUSD_VERSION_SEP :=
@@ -91,6 +91,7 @@ export PROJECT_NAME := freeradius
 #
 PROTOCOLS    := \
 	arp \
+	bfd \
 	dhcpv4 \
 	dhcpv6 \
 	dns \
@@ -338,7 +339,7 @@ endif
 #  the configure script.
 #
 ifneq "$(wildcard config.log)" ""
-  CONFIGURE_ARGS	   := $(shell head -10 config.log | grep '^  \$$' | sed 's/^....//;s:.*configure ::')
+  CONFIGURE_ARGS := $(shell head -10 config.log | grep '^  \$$' | sed 's/^....//;s:.*configure ::')
 
 #
 #  ONLY re-run "configure" if we're told to do that.  Otherwise every
@@ -387,25 +388,60 @@ certs:
 #
 #  Make a release.
 #
-#  Note that "Make.inc" has to be updated with the release number
-#  BEFORE running this command!
+#  Note that VERSION has to be updated with the release number and configure should
+#  be re-run if it's been run previously, BEFORE running this command!
+#
+#  These targets determine if release tarballs/rpms/debs should be produced by checking
+#  the following conditions:
+#
+#  - RELEASE=1 is set in make's environment.
+#  - A RELEASE file is present in the root of the working directory.
+#  - The current commit matches a release_ tag.
+#
+#  If none of these conditions are true, or RELEASE=0 is set, then development
+#  tarballs/rpms/debs will be produced.  These will build with developer-mode
+#  enabled, which enables additional debugging, adds full debugging symbols and disables
+#  optimisation.
 #
 ######################################################################
-BRANCH = $(shell git rev-parse --abbrev-ref HEAD)
-
 .PHONY: freeradius-server-$(PKG_VERSION).tar
-
+#
 # This can't depend on .git/ (dirs don't work) or .git/HEAD (not present in submodules)
 # so it's just left as a phony target.
+#
+# Do NOT move calculation of BRANCH outside of the recipe.  Every shell expansion
+# carries with it a performance penalty, that is felt every time make is executed.
+#
+# Original recipe used --add-virtual-file which was added in 237a1d1, on May 30th
+# 2022, which was too late for current versions of our target distros.
+# Code should be revisited in a few years to switch --add-file to --add-virtual-file.
+#
+BRANCH_CMD := git rev-parse --abbrev-ref HEAD
 freeradius-server-$(PKG_VERSION).tar:
 	rm -rf $(top_srcdir)/$(BUILD_DIR)/freeradius-server-$(PKG_VERSION)
 	mkdir -p $(top_srcdir)/$(BUILD_DIR)
-	git archive --format=tar --prefix=freeradius-server-$(PKG_VERSION)/ $(BRANCH) | tar -C $(top_srcdir)/$(BUILD_DIR) -xf -
-	git submodule foreach --recursive 'git archive --format=tar --prefix=freeradius-server-$(PKG_VERSION)/$$sm_path/ $$sha1 | tar -C $(top_srcdir)/$(BUILD_DIR) -xf -'
+	BRANCH=$$(${BRANCH_CMD}); \
+	tmp=$$(mktemp -d); \
+	if [ $$(./version.sh is_release) -eq 1 ]; then\
+		touch "$${tmp}/RELEASE"; \
+		release_arg="--add-file=$${tmp}/RELEASE"; \
+	fi; \
+	echo "$$(./version.sh commit)" > "$${tmp}/VERSION_COMMIT"; \
+	echo "$$(./version.sh commit_depth)" > "$${tmp}/VERSION_COMMIT_DEPTH"; \
+	git archive \
+		--format=tar \
+		--prefix="freeradius-server-$(PKG_VERSION)/" \
+		--add-file="$${tmp}/VERSION_COMMIT" \
+		--add-file="$${tmp}/VERSION_COMMIT_DEPTH" \
+		$${release_arg} \
+		$${BRANCH} | tar -C "${top_srcdir}/${BUILD_DIR}" -xf -; \
+	rm -rf "$${tmp}"; \
+	git submodule foreach --recursive 'git archive --format=tar --prefix=freeradius-server-$(PKG_VERSION)/$$sm_path/ $$sha1 | tar -C "${top_srcdir}/${BUILD_DIR}" -xf -'
 ifneq "$(EXT_MODULES)" ""
+	BRANCH=$$(${BRANCH_CMD}); \
 	for x in $(subst _ext,,$(EXT_MODULES)); do \
 		cd $(top_srcdir)/$${x}_ext && \
-		git archive --format=tar --prefix=freeradius-server-$(PKG_VERSION)/$$x/ $(BRANCH) | tar -C $(top_srcdir)/$(BUILD_DIR) -xf -; \
+		git archive --format=tar --prefix=freeradius-server-$(PKG_VERSION)/$$x/ $${BRANCH} | tar -C "${top_srcdir}/${BUILD_DIR}" -xf -; \
 	done
 endif
 	tar -cf $@ -C $(top_srcdir)/$(BUILD_DIR) freeradius-server-$(PKG_VERSION)
@@ -447,6 +483,9 @@ dist-publish: freeradius-server-$(PKG_VERSION).tar.gz.sig freeradius-server-$(PK
 dist-tag: freeradius-server-$(PKG_VERSION).tar.gz freeradius-server-$(PKG_VERSION).tar.bz2
 	@echo "git tag release_`echo $(PKG_VERSION) | tr .- __`"
 
+.PHONY: tar
+tar: freeradius-server-$(PKG_VERSION).tar.gz
+
 #
 #	Build a debian package
 #
@@ -457,7 +496,7 @@ deb:
 		  echo "'make deb' only works on debian systems" ; \
 		  exit 1; \
 		fi ; \
-		echo "Please run 'apt-get install build-essentials' "; \
+		echo "Please run 'apt-get install build-essential' "; \
 		exit 1; \
 	fi
 	EMAIL="packages@freeradius.org" fakeroot dch -b -v$(PKG_VERSION) ""

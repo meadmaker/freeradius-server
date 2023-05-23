@@ -11,10 +11,9 @@ olcDbIndex: objectClass eq
 olcLastMod: TRUE
 olcDbCheckpoint: 512 30
 olcAccess: to attrs=userPassword by dn="cn=admin,dc=example,dc=com" write by anonymous auth by self write by * none
-olcAccess: to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by dn="cn=admin,cn=config" manage
 olcAccess: to attrs=shadowLastChange by self write by * read
-olcAccess: to dn.base="" by * read
-olcAccess: to * by dn="cn=admin,dc=example,dc=com" write by * read
+olcAccess: to dn.base="" by dn="cn=admin,cn=config" manage by * read
+olcAccess: to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by dn="cn=admin,cn=config" manage by dn="cn=admin,dc=example,dc=com" write by * read
 
 # Create top-level object in domain
 dn: dc=example,dc=com
@@ -44,7 +43,7 @@ objectClass: organizationalUnit
 ou: profiles
 
 dn: cn=radprofile,ou=profiles,dc=subdept,dc=example,dc=com
-objectClass: radiusObjectProfile
+objectClass: freeradiusPolicy
 objectClass: radiusprofile
 cn: radprofile
 radiusFramedIPNetmask: 255.255.255.0
@@ -63,6 +62,25 @@ userPassword: password
 uidNumber: 100
 gidNumber: 100
 homeDirectory: /home/fred
+radiusIdleTimeout: 3600
+radiusAttribute: reply.Session-Timeout := 7200
+radiusAttribute: control.NAS-IP-Address := 1.2.3.4
+radiusProfileDN: cn=radprofile,ou=profiles,ou=subdept,dc=example,dc=com
+
+dn: uid=joe,ou=people,dc=subdept,dc=example,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+objectClass: radiusprofile
+uid: joe
+sn: Smith
+givenName: Joe
+cn: Joe Smith
+displayName: Joe Smith
+userPassword: secret
+uidNumber: 101
+gidNumber: 101
+homeDirectory: /home/joe
 radiusIdleTimeout: 3600
 radiusAttribute: reply.Session-Timeout := 7200
 radiusAttribute: control.NAS-IP-Address := 1.2.3.4

@@ -28,6 +28,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/global_lib.h>
 #include <freeradius-devel/server/module_rlm.h>
+#include <freeradius-devel/util/slab.h>
 
 static fr_dict_t 	const 		*dict_radius; /*dictionary for radius protocol*/
 
@@ -57,9 +58,14 @@ typedef struct {
 	char const			*uri;		//!< URI of imap server
 	fr_time_delta_t 		timeout;	//!< Timeout for connection and server response
 	fr_curl_tls_t			tls;
+	fr_curl_conn_config_t		conn_config;	//!< Re-usable CURL handle config
 } rlm_imap_t;
 
+FR_SLAB_TYPES(imap, fr_curl_io_request_t)
+FR_SLAB_FUNCS(imap, fr_curl_io_request_t)
+
 typedef struct {
+	imap_slab_list_t		*slab;		//!< Slab list for connection handles.
 	fr_curl_handle_t    		*mhandle;	//!< Thread specific multi handle.  Serves as the dispatch and coralling structure for imap requests.
 } rlm_imap_thread_t;
 
@@ -68,18 +74,17 @@ typedef struct {
  */
 static const CONF_PARSER module_config[] = {
 	{ FR_CONF_OFFSET("uri", FR_TYPE_STRING, rlm_imap_t, uri) },
-	{ FR_CONF_OFFSET("timeout",FR_TYPE_TIME_DELTA, rlm_imap_t, timeout) },
+	{ FR_CONF_OFFSET("timeout",FR_TYPE_TIME_DELTA, rlm_imap_t, timeout), .dflt = "5.0" },
 	{ FR_CONF_OFFSET("tls", FR_TYPE_SUBSECTION, rlm_imap_t, tls), .subcs = (void const *) fr_curl_tls_config },//!<loading the tls values
+	{ FR_CONF_OFFSET("connection", FR_TYPE_SUBSECTION, rlm_imap_t, conn_config), .subcs = (void const *) fr_curl_conn_config },
 	CONF_PARSER_TERMINATOR
 };
 
-static void imap_io_module_signal(module_ctx_t const *mctx, request_t *request, fr_state_signal_t action)
+static void imap_io_module_signal(module_ctx_t const *mctx, request_t *request, UNUSED fr_signal_t action)
 {
 	fr_curl_io_request_t	*randle = talloc_get_type_abort(mctx->rctx, fr_curl_io_request_t);
 	rlm_imap_thread_t	*t = talloc_get_type_abort(mctx->thread, rlm_imap_thread_t);
 	CURLMcode		ret;
-
-	if (action != FR_SIGNAL_CANCEL) return;
 
 	RDEBUG2("Forcefully cancelling pending IMAP request");
 
@@ -89,7 +94,7 @@ static void imap_io_module_signal(module_ctx_t const *mctx, request_t *request, 
 		/* Not much we can do */
 	}
 	t->mhandle->transfers--;
-	talloc_free(randle);
+	imap_slab_release(randle);
 }
 
 /*
@@ -116,13 +121,20 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate_resume(rlm_rcode_t *p_r
 	}
 
 	if (randle->result != CURLE_OK) {
-		talloc_free(randle);
-		RETURN_MODULE_REJECT;
+		CURLcode result = randle->result;
+		imap_slab_release(randle);
+		switch(result) {
+		case CURLE_PEER_FAILED_VERIFICATION:
+		case CURLE_LOGIN_DENIED:
+			RETURN_MODULE_REJECT;
+		default:
+			RETURN_MODULE_FAIL;
+		}
 	}
 
 	if (tls->extract_cert_attrs) fr_curl_response_certinfo(request, randle);
 
-	talloc_free(randle);
+	imap_slab_release(randle);
 	RETURN_MODULE_OK;
 }
 
@@ -139,18 +151,11 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate_resume(rlm_rcode_t *p_r
  */
 static unlang_action_t CC_HINT(nonnull(1,2)) mod_authenticate(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
 {
-	rlm_imap_t const	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_imap_t);
 	rlm_imap_thread_t       *t = talloc_get_type_abort(mctx->thread, rlm_imap_thread_t);
 
 	fr_pair_t const 	*username;
 	fr_pair_t const 	*password;
 	fr_curl_io_request_t    *randle;
-
-	randle = fr_curl_io_request_alloc(request);
-	if (!randle){
-	error:
-		RETURN_MODULE_FAIL;
-	}
 
 	username = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_name);
 	password = fr_pair_find_by_da(&request->request_pairs, NULL, attr_user_password);
@@ -170,28 +175,67 @@ static unlang_action_t CC_HINT(nonnull(1,2)) mod_authenticate(rlm_rcode_t *p_res
 		RETURN_MODULE_INVALID;
 	}
 
+	randle = imap_slab_reserve(t->slab);
+	if (!randle){
+		if (randle) imap_slab_release(randle);
+		RETURN_MODULE_FAIL;
+	}
+
 	FR_CURL_REQUEST_SET_OPTION(CURLOPT_USERNAME, username->vp_strvalue);
 	FR_CURL_REQUEST_SET_OPTION(CURLOPT_PASSWORD, password->vp_strvalue);
 
+	if (fr_curl_io_request_enqueue(t->mhandle, request, randle)) {
+	error:
+		imap_slab_release(randle);
+		RETURN_MODULE_FAIL;
+	}
+
+	return unlang_module_yield(request, mod_authenticate_resume, imap_io_module_signal, ~FR_SIGNAL_CANCEL, randle);
+}
+
+/** Clean up CURL handle on freeing
+ *
+ */
+static int _mod_conn_free(fr_curl_io_request_t *randle)
+{
+	curl_easy_cleanup(randle->candle);
+
+	return 0;
+}
+
+/** Callback to configure a CURL handle when it is allocated
+ *
+ */
+static int imap_conn_alloc(fr_curl_io_request_t *randle, void *uctx)
+{
+	rlm_imap_t const	*inst = talloc_get_type_abort(uctx, rlm_imap_t);
+
+	randle->candle = curl_easy_init();
+	if (unlikely(!randle->candle)) {
+	error:
+		fr_strerror_printf("Unable to initialise CURL handle");
+		return -1;
+	}
+
+	talloc_set_destructor(randle, _mod_conn_free);
+
 #if CURL_AT_LEAST_VERSION(7,45,0)
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_DEFAULT_PROTOCOL, "imap");
+	FR_CURL_SET_OPTION(CURLOPT_DEFAULT_PROTOCOL, "imap");
 #endif
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_URL, inst->uri);
+	FR_CURL_SET_OPTION(CURLOPT_URL, inst->uri);
 #if CURL_AT_LEAST_VERSION(7,85,0)
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_PROTOCOLS_STR, "imap,imaps");
+	FR_CURL_SET_OPTION(CURLOPT_PROTOCOLS_STR, "imap,imaps");
 #else
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_PROTOCOLS, CURLPROTO_IMAP | CURLPROTO_IMAPS);
+	FR_CURL_SET_OPTION(CURLOPT_PROTOCOLS, CURLPROTO_IMAP | CURLPROTO_IMAPS);
 #endif
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_CONNECTTIMEOUT_MS, fr_time_delta_to_msec(inst->timeout));
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_TIMEOUT_MS, fr_time_delta_to_msec(inst->timeout));
+	FR_CURL_SET_OPTION(CURLOPT_CONNECTTIMEOUT_MS, fr_time_delta_to_msec(inst->timeout));
+	FR_CURL_SET_OPTION(CURLOPT_TIMEOUT_MS, fr_time_delta_to_msec(inst->timeout));
 
-	FR_CURL_REQUEST_SET_OPTION(CURLOPT_VERBOSE, 1L);
+	if (DEBUG_ENABLED3) FR_CURL_SET_OPTION(CURLOPT_VERBOSE, 1L);
 
-	if (fr_curl_easy_tls_init(randle, &inst->tls) != 0) RETURN_MODULE_INVALID;
+	if (fr_curl_easy_tls_init(randle, &inst->tls) != 0) goto error;
 
-	if (fr_curl_io_request_enqueue(t->mhandle, request, randle)) RETURN_MODULE_INVALID;
-
-	return unlang_module_yield(request, mod_authenticate_resume, imap_io_module_signal, randle);
+	return 0;
 }
 
 /*
@@ -199,8 +243,16 @@ static unlang_action_t CC_HINT(nonnull(1,2)) mod_authenticate(rlm_rcode_t *p_res
  */
 static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 {
-	rlm_imap_thread_t    		*t = talloc_get_type_abort(mctx->thread, rlm_imap_thread_t);
-	fr_curl_handle_t    		*mhandle;
+	rlm_imap_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_imap_t);
+	rlm_imap_thread_t    	*t = talloc_get_type_abort(mctx->thread, rlm_imap_thread_t);
+	fr_curl_handle_t    	*mhandle;
+
+	if (!(t->slab = imap_slab_list_alloc(t, mctx->el, &inst->conn_config.reuse,
+					     imap_conn_alloc, NULL, inst,
+					     false, false))) {
+		ERROR("Connection handle pool instantiation failed");
+		return -1;
+	}
 
 	mhandle = fr_curl_io_init(t, mctx->el, false);
 	if (!mhandle) return -1;
@@ -217,6 +269,7 @@ static int mod_thread_detach(module_thread_inst_ctx_t const *mctx)
 	rlm_imap_thread_t    		*t = talloc_get_type_abort(mctx->thread, rlm_imap_thread_t);
 
 	talloc_free(t->mhandle);
+	talloc_free(t->slab);
     	return 0;
 }
 

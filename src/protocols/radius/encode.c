@@ -37,7 +37,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 			    fr_da_stack_t *da_stack, unsigned int depth,
 			    fr_dcursor_t *cursor, void *encode_ctx);
 
-static ssize_t encode_attribute(fr_dbuff_t *dbuff,
+static ssize_t encode_child(fr_dbuff_t *dbuff,
 				fr_da_stack_t *da_stack, unsigned int depth,
 				fr_dcursor_t *cursor, void *encode_ctx);
 
@@ -251,9 +251,9 @@ static ssize_t encode_tunnel_password(fr_dbuff_t *dbuff, fr_dbuff_marker_t *in, 
 /*
  *	Encode the contents of an attribute of type TLV.
  */
-static ssize_t encode_tlv_children(fr_dbuff_t *dbuff,
-				   fr_da_stack_t *da_stack, unsigned int depth,
-				   fr_dcursor_t *cursor, void *encode_ctx)
+static ssize_t encode_tlv(fr_dbuff_t *dbuff,
+			  fr_da_stack_t *da_stack, unsigned int depth,
+			  fr_dcursor_t *cursor, void *encode_ctx)
 {
 	ssize_t		slen;
 	fr_pair_t const	*vp = fr_dcursor_current(cursor);
@@ -286,7 +286,7 @@ static ssize_t encode_tlv_children(fr_dbuff_t *dbuff,
 			/*
 			 *	Call ourselves recursively to encode children.
 			 */
-			slen = encode_tlv_children(&work_dbuff, da_stack, depth, &child_cursor, encode_ctx);
+			slen = encode_tlv(&work_dbuff, da_stack, depth, &child_cursor, encode_ctx);
 			if (slen < 0) {
 				if (slen == PAIR_ENCODE_SKIPPED) continue;
 				return slen;
@@ -296,7 +296,7 @@ static ssize_t encode_tlv_children(fr_dbuff_t *dbuff,
 			fr_proto_da_stack_build(da_stack, vp ? vp->da : NULL);
 
 		} else {
-			slen = encode_attribute(&work_dbuff, da_stack, depth + 1, cursor, encode_ctx);
+			slen = encode_child(&work_dbuff, da_stack, depth + 1, cursor, encode_ctx);
 		}
 		if (slen < 0) {
 			if (slen == PAIR_ENCODE_SKIPPED) continue;
@@ -377,7 +377,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	/*
 	 *	TLVs are just another type of value.
 	 */
-	if (da->type == FR_TYPE_TLV) return encode_tlv_children(dbuff, da_stack, depth, cursor, encode_ctx);
+	if (da->type == FR_TYPE_TLV) return encode_tlv(dbuff, da_stack, depth, cursor, encode_ctx);
 
 	/*
 	 *	Catch errors early on.
@@ -392,7 +392,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 	 */
 	if ((vp->da->type == FR_TYPE_STRUCT) || (da->type == FR_TYPE_STRUCT)) {
 		slen = fr_struct_to_network(&work_dbuff, da_stack, depth, cursor, encode_ctx, encode_value,
-					    encode_tlv_children);
+					    encode_tlv);
 		if (slen < 0) return slen;
 
 		vp = fr_dcursor_current(cursor);
@@ -895,7 +895,7 @@ static ssize_t encode_concat(fr_dbuff_t *dbuff,
  * If it's a standard attribute, then vp->da->attr == attribute.
  * Otherwise, attribute may be something else.
  */
-static ssize_t encode_attribute(fr_dbuff_t *dbuff,
+static ssize_t encode_child(fr_dbuff_t *dbuff,
 				 fr_da_stack_t *da_stack, unsigned int depth,
 				 fr_dcursor_t *cursor, void *encode_ctx)
 {
@@ -909,6 +909,8 @@ static ssize_t encode_attribute(fr_dbuff_t *dbuff,
 
 	hlen = 2;
 	FR_DBUFF_IN_BYTES_RETURN(&work_dbuff, (uint8_t)da_stack->da[depth]->attr, hlen);
+
+	fr_assert(da_stack->da[depth] != NULL);
 
 	slen = encode_value(&work_dbuff, da_stack, depth, cursor, encode_ctx);
 	if (slen <= 0) return slen;
@@ -1340,7 +1342,7 @@ static ssize_t encode_nas_filter_rule(fr_dbuff_t *dbuff,
 
 /** Encode an RFC standard attribute 1..255
  *
- *  This function is not the same as encode_attribute(), because this
+ *  This function is not the same as encode_child(), because this
  *  one treats some "top level" attributes as special.  e.g.
  *  Message-Authenticator.
  */
@@ -1422,7 +1424,7 @@ static ssize_t encode_rfc(fr_dbuff_t *dbuff, fr_da_stack_t *da_stack, unsigned i
 	/*
 	 *	Once we've checked for various top-level magic, RFC attributes are just TLVs.
 	 */
-	return encode_attribute(dbuff, da_stack, depth, cursor, encode_ctx);
+	return encode_child(dbuff, da_stack, depth, cursor, encode_ctx);
 }
 
 /** Encode a data structure into a RADIUS attribute
@@ -1579,7 +1581,7 @@ ssize_t fr_radius_encode_pair(fr_dbuff_t *dbuff, fr_dcursor_t *cursor, void *enc
 
 	case FR_TYPE_TLV:
 		if (!flag_extended(&da->flags)) {
-			slen = encode_attribute(&work_dbuff, &da_stack, 0, cursor, encode_ctx);
+			slen = encode_child(&work_dbuff, &da_stack, 0, cursor, encode_ctx);
 		} else {
 			slen = encode_extended(&work_dbuff, &da_stack, 0, cursor, encode_ctx);
 		}

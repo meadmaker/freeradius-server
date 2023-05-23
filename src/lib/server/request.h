@@ -35,8 +35,7 @@ extern "C" {
 typedef struct fr_async_s fr_async_t;
 typedef struct request_s request_t;
 
-typedef struct rad_listen rad_listen_t;
-typedef struct rad_client RADCLIENT;
+typedef struct fr_client_s fr_client_t;
 
 #ifdef __cplusplus
 }
@@ -76,14 +75,14 @@ typedef enum request_state_t {
 	REQUEST_OTHER_4,
 } request_state_t;
 
-typedef	void (*fr_request_process_t)(request_t *, fr_state_signal_t);	//!< Function handler for requests.
+typedef	void (*fr_request_process_t)(request_t *, fr_signal_t);	//!< Function handler for requests.
 typedef	rlm_rcode_t (*RAD_REQUEST_FUNP)(request_t *);
 
 extern HIDDEN fr_dict_attr_t const *request_attr_root;
-extern HIDDEN fr_dict_attr_t const *request_attr_request;
-extern HIDDEN fr_dict_attr_t const *request_attr_reply;
-extern HIDDEN fr_dict_attr_t const *request_attr_control;
-extern HIDDEN fr_dict_attr_t const *request_attr_state;
+extern fr_dict_attr_t const *request_attr_request;
+extern fr_dict_attr_t const *request_attr_reply;
+extern fr_dict_attr_t const *request_attr_control;
+extern fr_dict_attr_t const *request_attr_state;
 
 /** Convenience macro for accessing the request list
  *
@@ -179,10 +178,10 @@ struct request_s {
 
 	/** Pair lists associated with the request
 	 *
-	 * @warn DO NOT allocate pairs directly beneath the root
-	 *	 or in the ctx of the request.
-	 *	 They MUST be allocated beneath their appropriate
-	 *	 list attribute.
+	 * @warning DO NOT allocate pairs directly beneath the root
+	 *	    or in the ctx of the request.
+	 *	    They MUST be allocated beneath their appropriate
+	 *	    list attribute.
 	 */
 	request_pair_lists_t	pair_list;	//!< Structure containing all pair lists.
 
@@ -214,7 +213,7 @@ struct request_s {
 	fr_radius_packet_t	*packet;	//!< Incoming request.
 	fr_radius_packet_t	*reply;		//!< Outgoing response.
 
-	RADCLIENT		*client;	//!< The client that originally sent us the request.
+	fr_client_t		*client;	//!< The client that originally sent us the request.
 
 	request_master_state_t	master_state;	//!< Set by the master thread to signal the child that's currently
 						//!< working with the request, to do something.
@@ -233,6 +232,7 @@ struct request_s {
 
 	int			alloc_line;	//!< Line the request was allocated on.
 
+	fr_dlist_t		listen_entry;	//!< request's entry in the list for this listener / socket
 	fr_dlist_t		free_entry;	//!< Request's entry in the free list.
 };				/* request_t typedef */
 
@@ -314,6 +314,8 @@ request_t	*_request_alloc(char const *file, int line, TALLOC_CTX *ctx,
 
 request_t	*_request_local_alloc(char const *file, int line, TALLOC_CTX *ctx,
 				      request_type_t type, request_init_args_t const *args);
+
+fr_pair_t	*request_state_replace(request_t *request, fr_pair_t *state) CC_HINT(nonnull(1));
 
 int		request_detach(request_t *child);
 

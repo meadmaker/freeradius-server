@@ -22,16 +22,12 @@ if (!(&reply.Session-Timeout == 7200)) {
         test_fail
 }
 
-if ("%(pairs:reply.)" == "") {
-        test_fail
-}
-
 # Attempt a bind authentication
 ldaptls.authenticate
 
 ldaptls.send
 
-&Tmp-String-0 := "%{ldaptls:ldap:///uid=fred,ou=people,dc=subdept,dc=example,dc=com?description}"
+&Tmp-String-0 := "%{ldaptls:ldap:///uid=joe,ou=people,dc=subdept,dc=example,dc=com?description}"
 
 if (!(&Tmp-String-0 == "User %{User-Name} authenticated")) {
 	test_fail

@@ -49,13 +49,13 @@ RCSID("$Id$")
  * @see http_body_type_t
  */
 const http_body_type_t http_body_type_supported[REST_HTTP_BODY_NUM_ENTRIES] = {
-	REST_HTTP_BODY_UNKNOWN,		// REST_HTTP_BODY_UNKNOWN
+	REST_HTTP_BODY_UNKNOWN,			// REST_HTTP_BODY_UNKNOWN
 	REST_HTTP_BODY_UNSUPPORTED,		// REST_HTTP_BODY_UNSUPPORTED
-	REST_HTTP_BODY_UNSUPPORTED,  	// REST_HTTP_BODY_UNAVAILABLE
+	REST_HTTP_BODY_UNSUPPORTED,  		// REST_HTTP_BODY_UNAVAILABLE
 	REST_HTTP_BODY_UNSUPPORTED,		// REST_HTTP_BODY_INVALID
 	REST_HTTP_BODY_NONE,			// REST_HTTP_BODY_NONE
 	REST_HTTP_BODY_CUSTOM_XLAT,		// REST_HTTP_BODY_CUSTOM_XLAT
-	REST_HTTP_BODY_CUSTOM_LITERAL,	// REST_HTTP_BODY_CUSTOM_LITERAL
+	REST_HTTP_BODY_CUSTOM_LITERAL,		// REST_HTTP_BODY_CUSTOM_LITERAL
 	REST_HTTP_BODY_POST,			// REST_HTTP_BODY_POST
 #ifdef HAVE_JSON
 	REST_HTTP_BODY_JSON,			// REST_HTTP_BODY_JSON
@@ -64,7 +64,7 @@ const http_body_type_t http_body_type_supported[REST_HTTP_BODY_NUM_ENTRIES] = {
 #endif
 	REST_HTTP_BODY_UNSUPPORTED,		// REST_HTTP_BODY_XML
 	REST_HTTP_BODY_UNSUPPORTED,		// REST_HTTP_BODY_YAML
-	REST_HTTP_BODY_INVALID,		// REST_HTTP_BODY_HTML
+	REST_HTTP_BODY_INVALID,			// REST_HTTP_BODY_HTML
 	REST_HTTP_BODY_PLAIN			// REST_HTTP_BODY_PLAIN
 };
 
@@ -99,17 +99,17 @@ const http_body_type_t http_body_type_supported[REST_HTTP_BODY_NUM_ENTRIES] = {
  *  #define curl_easy_setopt(handle,opt,param) curl_easy_setopt(handle,opt,param)
  */
 const unsigned long http_curl_auth[REST_HTTP_AUTH_NUM_ENTRIES] = {
-	[REST_HTTP_AUTH_UNKNOWN]		= 0,
-	[REST_HTTP_AUTH_NONE]			= 0,
-	[REST_HTTP_AUTH_TLS_SRP]		= CURLOPT_TLSAUTH_SRP,
-	[REST_HTTP_AUTH_BASIC]			= CURLAUTH_BASIC,
-	[REST_HTTP_AUTH_DIGEST]			= CURLAUTH_DIGEST,
-	[REST_HTTP_AUTH_DIGEST_IE]		= CURLAUTH_DIGEST_IE,
-	[REST_HTTP_AUTH_GSSNEGOTIATE]		= CURLAUTH_GSSNEGOTIATE,
-	[REST_HTTP_AUTH_NTLM]			= CURLAUTH_NTLM,
-	[REST_HTTP_AUTH_NTLM_WB]		= CURLAUTH_NTLM_WB,
-	[REST_HTTP_AUTH_ANY]			= CURLAUTH_ANY,
-	[REST_HTTP_AUTH_ANY_SAFE]		= CURLAUTH_ANYSAFE
+	[REST_HTTP_AUTH_UNKNOWN]			= 0,
+	[REST_HTTP_AUTH_NONE]				= 0,
+	[REST_HTTP_AUTH_TLS_SRP]			= CURLOPT_TLSAUTH_SRP,
+	[REST_HTTP_AUTH_BASIC]				= CURLAUTH_BASIC,
+	[REST_HTTP_AUTH_DIGEST]				= CURLAUTH_DIGEST,
+	[REST_HTTP_AUTH_DIGEST_IE]			= CURLAUTH_DIGEST_IE,
+	[REST_HTTP_AUTH_GSSNEGOTIATE]			= CURLAUTH_GSSNEGOTIATE,
+	[REST_HTTP_AUTH_NTLM]				= CURLAUTH_NTLM,
+	[REST_HTTP_AUTH_NTLM_WB]			= CURLAUTH_NTLM_WB,
+	[REST_HTTP_AUTH_ANY]				= CURLAUTH_ANY,
+	[REST_HTTP_AUTH_ANY_SAFE]			= CURLAUTH_ANYSAFE
 };
 
 /** Conversion table for method config values.
@@ -125,12 +125,12 @@ const unsigned long http_curl_auth[REST_HTTP_AUTH_NUM_ENTRIES] = {
  * @see fr_table_str_by_value
  */
 fr_table_num_sorted_t const http_method_table[] = {
-	{ L("DELETE"),				REST_HTTP_METHOD_DELETE		},
-	{ L("GET"),				REST_HTTP_METHOD_GET		},
-	{ L("PATCH"),				REST_HTTP_METHOD_PATCH		},
-	{ L("POST"),				REST_HTTP_METHOD_POST		},
-	{ L("PUT"),				REST_HTTP_METHOD_PUT		},
-	{ L("UNKNOWN"),				REST_HTTP_METHOD_UNKNOWN	}
+	{ L("DELETE"),					REST_HTTP_METHOD_DELETE		},
+	{ L("GET"),					REST_HTTP_METHOD_GET		},
+	{ L("PATCH"),					REST_HTTP_METHOD_PATCH		},
+	{ L("POST"),					REST_HTTP_METHOD_POST		},
+	{ L("PUT"),					REST_HTTP_METHOD_PUT		},
+	{ L("UNKNOWN"),					REST_HTTP_METHOD_UNKNOWN	}
 };
 size_t http_method_table_len = NUM_ELEMENTS(http_method_table);
 
@@ -144,31 +144,31 @@ size_t http_method_table_len = NUM_ELEMENTS(http_method_table);
  * @see fr_table_str_by_value
  */
 fr_table_num_sorted_t const http_body_type_table[] = {
-	{ L("html"),				REST_HTTP_BODY_HTML		},
-	{ L("invalid"),				REST_HTTP_BODY_INVALID		},
-	{ L("json"),				REST_HTTP_BODY_JSON		},
-	{ L("none"),				REST_HTTP_BODY_NONE		},
-	{ L("plain"),				REST_HTTP_BODY_PLAIN		},
-	{ L("post"),				REST_HTTP_BODY_POST		},
-	{ L("unavailable"),			REST_HTTP_BODY_UNAVAILABLE	},
-	{ L("unknown"),				REST_HTTP_BODY_UNKNOWN		},
-	{ L("unsupported"),			REST_HTTP_BODY_UNSUPPORTED	},
-	{ L("xml"),				REST_HTTP_BODY_XML		},
-	{ L("yaml"),				REST_HTTP_BODY_YAML		}
+	{ L("html"),					REST_HTTP_BODY_HTML		},
+	{ L("invalid"),					REST_HTTP_BODY_INVALID		},
+	{ L("json"),					REST_HTTP_BODY_JSON		},
+	{ L("none"),					REST_HTTP_BODY_NONE		},
+	{ L("plain"),					REST_HTTP_BODY_PLAIN		},
+	{ L("post"),					REST_HTTP_BODY_POST		},
+	{ L("unavailable"),				REST_HTTP_BODY_UNAVAILABLE	},
+	{ L("unknown"),					REST_HTTP_BODY_UNKNOWN		},
+	{ L("unsupported"),				REST_HTTP_BODY_UNSUPPORTED	},
+	{ L("xml"),					REST_HTTP_BODY_XML		},
+	{ L("yaml"),					REST_HTTP_BODY_YAML		}
 };
 size_t http_body_type_table_len = NUM_ELEMENTS(http_body_type_table);
 
 fr_table_num_sorted_t const http_auth_table[] = {
-	{ L("any"),				REST_HTTP_AUTH_ANY		},
-	{ L("basic"),				REST_HTTP_AUTH_BASIC		},
-	{ L("digest"),				REST_HTTP_AUTH_DIGEST		},
-	{ L("digest-ie"),			REST_HTTP_AUTH_DIGEST_IE	},
-	{ L("gss-negotiate"),			REST_HTTP_AUTH_GSSNEGOTIATE	},
-	{ L("none"),				REST_HTTP_AUTH_NONE		},
-	{ L("ntlm"),				REST_HTTP_AUTH_NTLM		},
-	{ L("ntlm-winbind"),			REST_HTTP_AUTH_NTLM_WB		},
-	{ L("safe"),				REST_HTTP_AUTH_ANY_SAFE		},
-	{ L("srp"),				REST_HTTP_AUTH_TLS_SRP		}
+	{ L("any"),					REST_HTTP_AUTH_ANY		},
+	{ L("basic"),					REST_HTTP_AUTH_BASIC		},
+	{ L("digest"),					REST_HTTP_AUTH_DIGEST		},
+	{ L("digest-ie"),				REST_HTTP_AUTH_DIGEST_IE	},
+	{ L("gss-negotiate"),				REST_HTTP_AUTH_GSSNEGOTIATE	},
+	{ L("none"),					REST_HTTP_AUTH_NONE		},
+	{ L("ntlm"),					REST_HTTP_AUTH_NTLM		},
+	{ L("ntlm-winbind"),				REST_HTTP_AUTH_NTLM_WB		},
+	{ L("safe"),					REST_HTTP_AUTH_ANY_SAFE		},
+	{ L("srp"),					REST_HTTP_AUTH_TLS_SRP		}
 };
 size_t http_auth_table_len = NUM_ELEMENTS(http_auth_table);
 
@@ -743,7 +743,7 @@ static int rest_decode_post(UNUSED rlm_rest_t const *instance, UNUSED rlm_rest_s
 						.attr = {
 							.prefix = TMPL_ATTR_REF_PREFIX_NO,
 							.dict_def = request->dict,
-							.list_def = PAIR_LIST_REPLY
+							.list_def = request_attr_reply
 						}
 					}) <= 0) {
 			RPWDEBUG("Failed parsing attribute (skipping)");
@@ -1034,7 +1034,7 @@ static int json_pair_alloc(rlm_rest_t const *instance, rlm_rest_section_t const 
 							.attr = {
 								.prefix = TMPL_ATTR_REF_PREFIX_NO,
 								.dict_def = request->dict,
-								.list_def = PAIR_LIST_REPLY
+								.list_def = request_attr_reply
 							}
 						}) <= 0) {
 				RPWDEBUG("Failed parsing attribute (skipping)");
@@ -1161,7 +1161,7 @@ static int json_pair_alloc(rlm_rest_t const *instance, rlm_rest_section_t const 
 					if (!vp) continue;
 				}
 				RINDENT();
-				RDEBUG2("&%s:%pP", fr_table_str_by_value(pair_list_table, tmpl_list(dst), ""), vp);
+				RDEBUG2("&%s:%pP", tmpl_list_name(tmpl_list(dst), ""), vp);
 				REXDENT();
 
 				fr_pair_list_init(&tmp_list);
@@ -1609,6 +1609,7 @@ static void rest_response_init(rlm_rest_section_t const *section,
 	ctx->state = WRITE_STATE_INIT;
 	ctx->alloc = 0;
 	ctx->used = 0;
+	ctx->code = 0;
 	TALLOC_FREE(ctx->buffer);
 }
 
@@ -1728,7 +1729,6 @@ int rest_request_config(module_ctx_t const *mctx, rlm_rest_section_t const *sect
 			char const *uri, char const *username, char const *password)
 {
 	rlm_rest_t const	*inst = talloc_get_type_abort(mctx->inst->data, rlm_rest_t);
-	rlm_rest_thread_t const	*t = talloc_get_type_abort(mctx->thread, rlm_rest_thread_t);
 	rlm_rest_curl_context_t *ctx = talloc_get_type_abort(randle->uctx, rlm_rest_curl_context_t);
 	CURL			*candle = randle->candle;
 	fr_time_delta_t		timeout;
@@ -1736,7 +1736,7 @@ int rest_request_config(module_ctx_t const *mctx, rlm_rest_section_t const *sect
 	http_auth_type_t	auth = section->auth;
 
 	CURLcode		ret = CURLE_OK;
-	char const		*option = "unknown";
+	char const		*option;
 
 	char			buffer[512];
 	bool			content_type_set = false;
@@ -1770,7 +1770,7 @@ int rest_request_config(module_ctx_t const *mctx, rlm_rest_section_t const *sect
 	FR_CURL_REQUEST_SET_OPTION(CURLOPT_NOSIGNAL, 1L);
 	FR_CURL_REQUEST_SET_OPTION(CURLOPT_USERAGENT, "FreeRADIUS " RADIUSD_VERSION_STRING);
 
-	timeout = fr_pool_timeout(t->pool);
+	timeout = inst->conn_config.connect_timeout;
 	RDEBUG3("Connect timeout is %pVs, request timeout is %pVs",
 	        fr_box_time_delta(timeout), fr_box_time_delta(section->timeout));
 	FR_CURL_REQUEST_SET_OPTION(CURLOPT_CONNECTTIMEOUT_MS, fr_time_delta_to_msec(timeout));
@@ -1836,11 +1836,11 @@ int rest_request_config(module_ctx_t const *mctx, rlm_rest_section_t const *sect
 			 */
 			if (!content_type_set && (strncasecmp(header->vp_strvalue, "content-type:", sizeof("content-type:") - 1) == 0)) {
 				char const *content_type = header->vp_strvalue + (sizeof("content-type:") - 1);
-				
+
 				while (isspace((uint8_t)*content_type)) content_type++;
-				
+
 				RDEBUG3("Request body content-type provided as \"%s\"", content_type);
-				
+
 				content_type_set = true;
 			}
 
@@ -1863,7 +1863,7 @@ int rest_request_config(module_ctx_t const *mctx, rlm_rest_section_t const *sect
 				REDEBUG("Failed creating header");
 				return -1;
 			}
-			
+
 			RDEBUG3("Request body content-type will be \"%s\"", content_type);
 		}
 	}
@@ -2153,46 +2153,6 @@ int rest_response_decode(rlm_rest_t const *instance, rlm_rest_section_t const *s
 	return ret;
 }
 
-/** Cleans up after a REST request.
- *
- * Resets all options associated with a CURL handle, and frees any headers
- * associated with it.
- *
- * Calls rest_read_ctx_free and rest_response_free to free any memory used by
- * context data.
- *
- * @param[in] instance configuration data.
- * @param[in] randle to cleanup.
- */
-void rest_request_cleanup(UNUSED rlm_rest_t const *instance, fr_curl_io_request_t *randle)
-{
-	rlm_rest_curl_context_t *ctx = talloc_get_type_abort(randle->uctx, rlm_rest_curl_context_t);
-	CURL			*candle = randle->candle;
-
-	/*
-	 *  Clear any previously configured options
-	 */
-	curl_easy_reset(candle);
-
-	/*
-	 *  Free header list
-	 */
-	if (ctx->headers != NULL) {
-		curl_slist_free_all(ctx->headers);
-		ctx->headers = NULL;
-	}
-
-	/*
-	 *  Free response data
-	 */
-	TALLOC_FREE(ctx->body);
-	TALLOC_FREE(ctx->response.buffer);
-	TALLOC_FREE(ctx->request.encoder);
-	TALLOC_FREE(ctx->response.decoder);
-
-	randle->request = NULL;
-}
-
 /** URL encodes a string.
  *
  * Encode special chars as per RFC 3986 section 4.
@@ -2208,7 +2168,6 @@ size_t rest_uri_escape(UNUSED request_t *request, char *out, size_t outlen, char
 {
 	char *escaped;
 
-	/* coverity[alloc_strlen] */
 	escaped = curl_escape(raw, 0);
 	strlcpy(out, escaped, outlen);
 	curl_free(escaped);

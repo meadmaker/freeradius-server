@@ -227,7 +227,7 @@ int main(int argc, char *argv[])
 	bool			display_version = false;
 	bool			radmin = false;
 	int			from_child[2] = {-1, -1};
-	char			*program;
+	char const		*program;
 	fr_schedule_t		*sc = NULL;
 	int			ret = EXIT_SUCCESS;
 
@@ -583,6 +583,15 @@ int main(int argc, char *argv[])
 	}
 
 	/*
+	 *	Load dictionary attributes used
+	 *	for requests.
+	 */
+	if (request_global_init() < 0) {
+		fr_perror("%s", program);
+		EXIT_WITH_FAILURE;
+	}
+
+	/*
 	 *  Read the configuration files, BEFORE doing anything else.
 	 */
 	if (main_config_init(config) < 0) EXIT_WITH_FAILURE;
@@ -830,7 +839,6 @@ int main(int argc, char *argv[])
 		COPY(max_request_time);
 		COPY(unflatten_after_decode);
 		COPY(unflatten_before_encode);
-		COPY(flatten_before_encode);
 
 		/*
 		 *	Single server mode: use the global event list.

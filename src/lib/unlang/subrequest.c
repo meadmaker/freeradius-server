@@ -26,6 +26,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/state.h>
 #include <freeradius-devel/server/tmpl_dcursor.h>
+#include <freeradius-devel/unlang/action.h>
 #include "unlang_priv.h"
 #include "interpret_priv.h"
 #include "subrequest_priv.h"
@@ -35,7 +36,7 @@ RCSID("$Id$")
  *
  */
 static void unlang_subrequest_parent_signal(UNUSED request_t *request, unlang_stack_frame_t *frame,
-					    fr_state_signal_t action)
+					    fr_signal_t action)
 {
 	unlang_frame_state_subrequest_t	*state = talloc_get_type_abort(frame->state, unlang_frame_state_subrequest_t);
 	request_t			*child = talloc_get_type_abort(state->child, request_t);
@@ -67,15 +68,21 @@ static unlang_action_t unlang_subrequest_parent_resume(rlm_rcode_t *p_result, re
 	request_t				*child = state->child;
 	unlang_subrequest_t			*gext;
 
-	RDEBUG3("Subrequest complete");
-
 	/*
 	 *	Child detached
 	 */
 	if (!state->child) {
-		RDEBUG3("Child has detached");
-		return UNLANG_ACTION_CALCULATE_RESULT;
+		RDEBUG3("subrequest detached during its execution - Not updating rcode or reply attributes");
+
+		/*
+		 *	If the child detached the subrequest section
+		 *	should become entirely transparent, and
+		 *	should not update the section rcode.
+		 */
+		return UNLANG_ACTION_EXECUTE_NEXT;
 	}
+
+	RDEBUG3("subrequest complete");
 
 	/*
 	 *	If there's a no destination tmpl, we're done.
@@ -203,18 +210,9 @@ static unlang_action_t unlang_subrequest_parent_init(rlm_rcode_t *p_result, requ
 	}
 	fr_pair_append(&child->request_pairs, vp);
 
-	if (gext->src) {
-		if (tmpl_is_list(gext->src)) {
-			if (tmpl_copy_pairs(child->request_ctx, &child->request_pairs, request, gext->src) < -1) {
-				RPEDEBUG("Failed copying source attributes into subrequest");
-				goto fail;
-			}
-		} else {
-			if (tmpl_copy_pair_children(child->request_ctx, &child->request_pairs, request, gext->src) < -1) {
-				RPEDEBUG("Failed copying source attributes into subrequest");
-				goto fail;
-			}
-		}
+	if ((gext->src) && (tmpl_copy_pair_children(child->request_ctx, &child->request_pairs, request, gext->src) < -1)) {
+		RPEDEBUG("Failed copying source attributes into subrequest");
+		goto fail;
 	}
 
 	/*

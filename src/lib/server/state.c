@@ -629,15 +629,13 @@ void fr_state_discard(fr_state_tree_t *state, request_t *request)
 
 	/*
 	 *	If fr_state_to_request was called, then the request
-	 *	holds the state data, and we need to destroy it
+	 *	holds the existing state data.  We need to destroy it,
 	 *	and return the request to the state it was in when
-	 *	it was first alloced, just in case a user does something
-	 *	stupid like add additional session-state attributes
+	 *	it was first allocated, just in case a user does something
+	 *	stupid like add more session-state attributes
 	 *	in  one of the later sections.
 	 */
-	TALLOC_FREE(request->session_state_ctx);
-
-	MEM(request->session_state_ctx = fr_pair_afrom_da(NULL, request_attr_state));
+	talloc_free(request_state_replace(request, NULL));
 
 	RDEBUG3("%s - discarded", state->da->name);
 
@@ -662,7 +660,6 @@ void fr_state_discard(fr_state_tree_t *state, request_t *request)
 int fr_state_to_request(fr_state_tree_t *state, request_t *request)
 {
 	fr_state_entry_t	*entry;
-	TALLOC_CTX		*old_ctx = NULL;
 	fr_pair_t		*vp;
 
 	/*
@@ -689,12 +686,16 @@ int fr_state_to_request(fr_state_tree_t *state, request_t *request)
 		RERROR("State entry has already been thawed by a request %"PRIu64, entry->thawed->number);
 		return -2;
 	}
-	if (request->session_state_ctx) old_ctx = request->session_state_ctx;	/* Store for later freeing */
 
+	/*
+	 *	Discard any existing session state, and replace it
+	 *	with the cached one.
+	 */
 	fr_assert(entry->ctx);
+	talloc_free(request_state_replace(request, entry->ctx));
+	entry->ctx = NULL;
 
 	request->seq_start = entry->seq_start;
-	request->session_state_ctx = entry->ctx;
 
 	/*
 	 *	Associate old state with the request
@@ -708,18 +709,12 @@ int fr_state_to_request(fr_state_tree_t *state, request_t *request)
 	request_data_add(request, state, 0, entry, true, true, false);
 	request_data_restore(request, &entry->data);
 
-	entry->ctx = NULL;
 	entry->thawed = request;
 
 	if (!fr_pair_list_empty(&request->session_state_pairs)) {
 		RDEBUG2("Restored &session-state");
 		log_request_pair_list(L_DBG_LVL_2, request, NULL, &request->session_state_pairs, "&session-state.");
 	}
-
-	/*
-	 *	Free this outside of the mutex for less contention.
-	 */
-	if (old_ctx) talloc_free(old_ctx);
 
 	RDEBUG3("%s - restored", state->da->name);
 
@@ -743,6 +738,7 @@ int fr_request_to_state(fr_state_tree_t *state, request_t *request)
 {
 	fr_state_entry_t	*entry, *old;
 	fr_dlist_head_t		data;
+	fr_pair_t		*state_ctx;
 
 	old = request_data_get(request, state, 0);
 	request_data_list_init(&data);
@@ -753,8 +749,18 @@ int fr_request_to_state(fr_state_tree_t *state, request_t *request)
 	if (!fr_pair_list_empty(&request->session_state_pairs)) {
 		RDEBUG2("Saving &session-state");
 		log_request_pair_list(L_DBG_LVL_2, request, NULL, &request->session_state_pairs, "&session-state.");
+
+#ifdef WITH_VERIFY_PTR
+		/*
+		 *	Double check all the session state pairs
+		 *	are parented correctly, else we'll get
+		 *	memory errors when we restore.
+		 */
+		fr_pair_list_verify(__FILE__, __LINE__, request->session_state_ctx, &request->session_state_pairs);
+#endif
 	}
 
+	MEM(state_ctx = request_state_replace(request, NULL));
 	PTHREAD_MUTEX_LOCK(&state->mutex);
 
 	/*
@@ -764,6 +770,8 @@ int fr_request_to_state(fr_state_tree_t *state, request_t *request)
 	if (!entry) {
 		PTHREAD_MUTEX_UNLOCK(&state->mutex);
 		RERROR("Creating state entry failed");
+
+		talloc_free(request_state_replace(request, state_ctx));
 		request_data_restore(request, &data);	/* Put it back again */
 		return -1;
 	}
@@ -772,11 +780,9 @@ int fr_request_to_state(fr_state_tree_t *state, request_t *request)
 	fr_assert(request->session_state_ctx);
 
 	entry->seq_start = request->seq_start;
-	entry->ctx = request->session_state_ctx;
+	entry->ctx = state_ctx;
 	fr_dlist_move(&entry->data, &data);
 	PTHREAD_MUTEX_UNLOCK(&state->mutex);
-
-	MEM(request->session_state_ctx = fr_pair_afrom_da(NULL, request_attr_state));	/* fixme - should use a pool */
 
 	RDEBUG3("%s - saved", state->da->name);
 	REQUEST_VERIFY(request);
@@ -819,7 +825,7 @@ void fr_state_store_in_parent(request_t *child, void const *unique_ptr, int uniq
 		request_data_list_init(&child_entry->data);
 		talloc_set_destructor(child_entry, _free_child_data);
 
-		child_entry->ctx = child->session_state_ctx;
+		child_entry->ctx = request_state_replace(child, NULL);
 
 		/*
 		 *	Pull everything out of the child,
@@ -838,14 +844,6 @@ void fr_state_store_in_parent(request_t *child, void const *unique_ptr, int uniq
 		 */
 		request_data_talloc_add(request->parent, unique_ptr, unique_int,
 					state_child_entry_t, child_entry, true, false, true);
-
-		/*
-		 *	Ensure fr_state_restore_to_child
-		 *	can be called again if it's actually
-		 *	needed, by giving the child it's own
-		 * 	unique state_ctx again.
-		 */
-		MEM(request->session_state_ctx = fr_pair_afrom_da(NULL, request_attr_state));
 	}
 }
 
@@ -885,9 +883,8 @@ void fr_state_restore_to_child(request_t *child, void const *unique_ptr, int uni
 	/*
 	 *	If we can restore from the parent, do so
 	 */
-	TALLOC_FREE(child->session_state_ctx);
 	fr_assert_msg(child_entry->ctx, "session child entry missing ctx");
-	child->session_state_ctx = child_entry->ctx;
+	talloc_free(request_state_replace(child, child_entry->ctx));
 	child_entry->ctx = NULL;				/* No longer owns the ctx */
 	child_entry->thawed = child;
 

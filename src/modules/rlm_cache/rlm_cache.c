@@ -30,6 +30,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/modpriv.h>
 #include <freeradius-devel/server/dl_module.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include "rlm_cache.h"
 
@@ -390,8 +391,17 @@ static unlang_action_t cache_insert(rlm_rcode_t *p_result,
 			case TMPL_TYPE_ATTR:
 			{
 				fr_token_t	quote;
-				c_map->lhs = map->lhs;	/* lhs shouldn't be touched, so this is ok */
-			do_rhs:
+				/*
+				 *	If the LHS is structural, we need a new template
+				 *	which is the combination of the existing LHS and
+				 *	the attribute.
+				 */
+				if (tmpl_attr_tail_da_is_structural(map->lhs)) {
+					tmpl_attr_afrom_list(c_map, &c_map->lhs, map->lhs, vp->da);
+				} else {
+					c_map->lhs = map->lhs;	/* lhs shouldn't be touched, so this is ok */
+				}
+
 				if (vp->vp_type == FR_TYPE_STRING) {
 					quote = is_printable(vp->vp_strvalue, vp->vp_length) ?
 							     T_SINGLE_QUOTED_STRING : T_DOUBLE_QUOTED_STRING;
@@ -403,24 +413,12 @@ static unlang_action_t cache_insert(rlm_rcode_t *p_result,
 							    TMPL_TYPE_DATA, quote, map->rhs->name, map->rhs->len));
 				if (fr_value_box_copy(c_map->rhs, tmpl_value(c_map->rhs), &vp->data) < 0) {
 					REDEBUG("Failed copying attribute value");
-				error:
 					talloc_free(pool);
 					talloc_free(c);
 					RETURN_MODULE_FAIL;
 				}
 			}
 				break;
-
-			/*
-			 *	Lists are weird... We need to fudge a new LHS template,
-			 *	which is a combination of the LHS list and the attribute.
-			 */
-			case TMPL_TYPE_LIST:
-				if (tmpl_attr_afrom_list(c_map, &c_map->lhs, map->lhs, vp->da) < 0) {
-					RPERROR("Failed attribute -> list copy");
-					goto error;
-				}
-				goto do_rhs;
 
 			default:
 				fr_assert(0);
@@ -522,8 +520,7 @@ static int cache_verify(map_t *map, void *ctx)
 {
 	if (unlang_fixup_update(map, ctx) < 0) return -1;
 
-	if (!tmpl_is_attr(map->lhs) &&
-	    !tmpl_is_list(map->lhs)) {
+	if (!tmpl_is_attr(map->lhs)) {
 		cf_log_err(map->ci, "Destination must be an attribute ref or a list");
 		return -1;
 	}
@@ -817,7 +814,7 @@ static xlat_arg_parser_t const cache_xlat_args[] = {
 static CC_HINT(nonnull)
 xlat_action_t cache_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			 xlat_ctx_t const *xctx,
-			 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			 request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cache_entry_t 		*c = NULL;
 	rlm_cache_t			*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_cache_t);
@@ -845,6 +842,7 @@ xlat_action_t cache_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				      &(tmpl_rules_t){
 				      	.attr = {
 				      		.dict_def = request->dict,
+						.list_def = request_attr_request,
 				      		.prefix = TMPL_ATTR_REF_PREFIX_AUTO
 				      	}
 				      });
@@ -974,8 +972,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	Register the cache xlat function
 	 */
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, cache_xlat, FR_TYPE_VOID, 0);
-	xlat_func_args(xlat, cache_xlat_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, cache_xlat, FR_TYPE_VOID);
+	xlat_func_args_set(xlat, cache_xlat_args);
 
 	return 0;
 }
@@ -1013,13 +1011,15 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 	{
 		tmpl_rules_t	parse_rules = {
 			.attr = {
+				.list_def = request_attr_request,
+				.allow_wildcard = true,
 				.allow_foreign = true	/* Because we don't know where we'll be called */
 			}
 		};
 
 		map_list_init(&inst->maps);
 		if (map_afrom_cs(inst, &inst->maps, update,
-				 &parse_rules, &parse_rules, cache_verify, NULL, MAX_ATTRMAP) < 0) {
+				 &parse_rules, &parse_rules, cache_verify, inst, MAX_ATTRMAP) < 0) {
 			return -1;
 		}
 	}

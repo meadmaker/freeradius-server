@@ -32,6 +32,7 @@ RCSID("$Id$")
 #include <freeradius-devel/util/dlist.h>
 #include <freeradius-devel/util/event.h>
 #include <freeradius-devel/util/lst.h>
+#include <freeradius-devel/util/log.h>
 #include <freeradius-devel/util/rb.h>
 #include <freeradius-devel/util/strerror.h>
 #include <freeradius-devel/util/syserror.h>
@@ -90,6 +91,10 @@ static fr_table_num_sorted_t const kevent_filter_table[] = {
 	{ L("EVFILT_WRITE"),	EVFILT_WRITE }
 };
 static size_t kevent_filter_table_len = NUM_ELEMENTS(kevent_filter_table);
+
+#ifdef __linux__
+static int log_conf_kq;
+#endif
 
 /** A timer event
  *
@@ -1389,13 +1394,17 @@ static int _event_timer_free(fr_event_timer_t *ev)
 		(void) fr_dlist_remove(&el->ev_to_add, ev);
 	} else {
 		int		ret = fr_lst_extract(el->times, ev);
-		char const	*err_file = "not-available";
-		int		err_line = 0;
+		char const	*err_file;
+		int		err_line;
 
 #ifndef NDEBUG
 		err_file = ev->file;
 		err_line = ev->line;
+#else
+		err_file = "not-available";
+		err_line = 0;
 #endif
+
 
 		/*
 		 *	Events MUST be in the lst (or the insertion list).
@@ -1504,14 +1513,17 @@ int _fr_event_timer_at(NDEBUG_LOCATION_ARGS
 		 */
 		if (!fr_dlist_entry_in_list(&ev->entry)) {
 			int		ret;
-			char const	*err_file = "not-available";
-			int		err_line = 0;
+			char const	*err_file;
+			int		err_line;
 
 			ret = fr_lst_extract(el->times, ev);
 
 #ifndef NDEBUG
 			err_file = ev->file;
 			err_line = ev->line;
+#else
+			err_file = "not-available";
+			err_line = 0;
 #endif
 
 			/*
@@ -1591,11 +1603,28 @@ int _fr_event_timer_in(NDEBUG_LOCATION_ARGS
 int fr_event_timer_delete(fr_event_timer_t const **ev_p)
 {
 	fr_event_timer_t *ev;
+	int ret;
 
 	if (unlikely(!*ev_p)) return 0;
 
 	ev = UNCONST(fr_event_timer_t *, *ev_p);
-	return talloc_free(ev);
+	ret = talloc_free(ev);
+
+	/*
+	 *	Don't leave a garbage pointer value
+	 *	in the parent.
+	 */
+	if (likely(ret == 0)) *ev_p = NULL;
+	return 0;
+}
+
+/** Internal timestamp representing when the timer should fire
+ *
+ * @return When the timestamp should fire.
+ */
+fr_time_t fr_event_timer_when(fr_event_timer_t const *ev)
+{
+	return ev->when;
 }
 
 /** Remove PID wait event from kevent if the fr_event_pid_t is freed
@@ -1750,6 +1779,7 @@ int _fr_event_pid_wait(NDEBUG_LOCATION_ARGS
 	 */
 	if (unlikely(kevent(el->kq, &evset, 1, NULL, 0, NULL) < 0)) {
     		siginfo_t	info;
+		int ret;
 
 		/*
 		 *	Ensure we don't accidentally pick up the error
@@ -1782,7 +1812,8 @@ int _fr_event_pid_wait(NDEBUG_LOCATION_ARGS
 		 *	we'd consider to indicate that the process
 		 *	had completed.
 		 */
-		if (waitid(P_PID, pid, &info, WEXITED | WNOHANG | WNOWAIT) >= 0) {
+		ret = waitid(P_PID, pid, &info, WEXITED | WNOHANG | WNOWAIT);
+		if (ret > 0) {
 			static fr_table_num_sorted_t const si_codes[] = {
 				{ L("exited"),	CLD_EXITED },
 				{ L("killed"),	CLD_KILLED },
@@ -1821,6 +1852,7 @@ int _fr_event_pid_wait(NDEBUG_LOCATION_ARGS
 				 *	because they were not yet yielded,
 				 *	leading to hangs.
 				 */
+			early_exit:
 				if (fr_event_user_insert(ev, el, &ev->early_exit.ev, true, _fr_event_pid_early_exit, ev) < 0) {
 					fr_strerror_printf_push("Failed adding wait for PID %ld, and failed adding "
 								"backup user event", (long) pid);
@@ -1837,6 +1869,18 @@ int _fr_event_pid_wait(NDEBUG_LOCATION_ARGS
 
 				goto error;
 			}
+		/*
+		 *	Failed adding waiter for process, but process has not completed...
+		 *
+		 *	This weird, but seems to happen on macOS ocassionally.
+		 *
+		 *	Add an event to run early exit...
+		 *
+		 *	Man pages for waitid say if it returns 0 the info struct can be in
+		 *	a nondeterministic state, so there's nothing more to do.
+		 */
+		} else if (ret == 0) {
+			goto early_exit;
 		} else {
 			/*
 			*	Print this error here, so that the caller gets
@@ -2773,6 +2817,68 @@ static int _event_build_indexes(UNUSED void *uctx)
 	return 0;
 }
 
+#ifdef EVFILT_LIBKQUEUE
+/** kqueue logging wrapper function
+ *
+ */
+static CC_HINT(format (printf, 1, 2)) CC_HINT(nonnull)
+void _event_kqueue_log(char const *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	fr_vlog(&default_log, L_DBG, __FILE__, __LINE__, fmt, ap);
+	va_end(ap);
+}
+
+/** If we're building with libkqueue, and at debug level 4 or higher, enable libkqueue debugging output
+ *
+ * This requires a debug build of libkqueue
+ */
+static int _event_kqueue_logging(UNUSED void *uctx)
+{
+	struct kevent kev, receipt;
+
+	log_conf_kq = kqueue();
+	if (unlikely(log_conf_kq < 0)) {
+		fr_strerror_const("Failed initialising logging configuration kqueue");
+		return -1;
+	}
+
+	EV_SET(&kev, 0, EVFILT_LIBKQUEUE, EV_ADD, NOTE_DEBUG_FUNC, (intptr_t)_event_kqueue_log, NULL);
+	if (kevent(log_conf_kq, &kev, 1, &receipt, 1, &(struct timespec){}) != 1) {
+		close(log_conf_kq);
+		log_conf_kq = -1;
+		return 1;
+	}
+
+	if (fr_debug_lvl >= L_DBG_LVL_3) {
+		EV_SET(&kev, 0, EVFILT_LIBKQUEUE, EV_ADD, NOTE_DEBUG, 1, NULL);
+		if (kevent(log_conf_kq, &kev, 1, &receipt, 1, &(struct timespec){}) != 1) {
+			fr_strerror_const("Failed enabling libkqueue debug logging");
+			close(log_conf_kq);
+			log_conf_kq = -1;
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int _event_kqueue_logging_stop(UNUSED void *uctx)
+{
+	struct kevent kev, receipt;
+
+	EV_SET(&kev, 0, EVFILT_LIBKQUEUE, EV_ADD, NOTE_DEBUG_FUNC, 0, NULL);
+	(void)kevent(log_conf_kq, &kev, 1, &receipt, 1, &(struct timespec){});
+
+	close(log_conf_kq);
+	log_conf_kq = -1;
+
+	return 0;
+}
+#endif
+
 /** Initialise a new event list
  *
  * @param[in] ctx		to allocate memory in.
@@ -2793,6 +2899,9 @@ fr_event_list_t *fr_event_list_alloc(TALLOC_CTX *ctx, fr_event_status_cb_t statu
 	 *	function is called.
 	 */
 	fr_atexit_global_once_ret(&ret, _event_build_indexes, _event_free_indexes, NULL);
+#ifdef EVFILT_LIBKQUEUE
+	fr_atexit_global_once_ret(&ret, _event_kqueue_logging, _event_kqueue_logging_stop, NULL);
+#endif
 
 	el = talloc_zero(ctx, fr_event_list_t);
 	if (!fr_cond_assert(el)) {

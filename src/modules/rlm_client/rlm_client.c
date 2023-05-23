@@ -30,6 +30,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/server/map_proc.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 /** Client field
  *
@@ -103,23 +104,24 @@ static int _map_proc_client_get_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request
 
 /** Map multiple attributes from a client into the request
  *
+ * @param[out] p_result		Result of applying the map:
+ *				- #RLM_MODULE_NOOP no rows were returned.
+ *				- #RLM_MODULE_UPDATED if one or more #fr_pair_t were added to the #request_t.
+ *				- #RLM_MODULE_FAIL if an error occurred.
  * @param[in] mod_inst		NULL.
  * @param[in] proc_inst		NULL.
  * @param[in] request		The current request.
  * @param[in] client_override	If NULL, use the current client, else use the client matching
  *				the ip given.
  * @param[in] maps		Head of the map list.
- * @return
- *	- #RLM_MODULE_NOOP no rows were returned.
- *	- #RLM_MODULE_UPDATED if one or more #fr_pair_t were added to the #request_t.
- *	- #RLM_MODULE_FAIL if an error occurred.
+ * @return UNLANG_ACTION_CALCULATE_RESULT
  */
-static rlm_rcode_t map_proc_client(UNUSED void *mod_inst, UNUSED void *proc_inst, request_t *request,
-				   FR_DLIST_HEAD(fr_value_box_list) *client_override, map_list_t const *maps)
+static unlang_action_t map_proc_client(rlm_rcode_t *p_result, UNUSED void *mod_inst, UNUSED void *proc_inst,
+				       request_t *request, fr_value_box_list_t *client_override, map_list_t const *maps)
 {
 	rlm_rcode_t		rcode = RLM_MODULE_OK;
 	map_t const		*map = NULL;
-	RADCLIENT		*client;
+	fr_client_t		*client;
 	client_get_vp_ctx_t	uctx;
 
 	if (!fr_value_box_list_empty(client_override)) {
@@ -136,7 +138,7 @@ static rlm_rcode_t map_proc_client(UNUSED void *mod_inst, UNUSED void *proc_inst
 						      FR_VALUE_BOX_LIST_FREE, true,
 						      SIZE_MAX) < 0) {
 			REDEBUG("Failed concatenating input data");
-			return RLM_MODULE_FAIL;
+			RETURN_MODULE_FAIL;
 		}
 		client_str = client_override_head->vb_strvalue;
 
@@ -171,7 +173,7 @@ static rlm_rcode_t map_proc_client(UNUSED void *mod_inst, UNUSED void *proc_inst
 		client = client_from_request(request);
 		if (!client) {
 			REDEBUG("No client associated with this request");
-			return RLM_MODULE_FAIL;
+			RETURN_MODULE_FAIL;
 		}
 	}
 	uctx.cs = client->cs;
@@ -211,7 +213,7 @@ static rlm_rcode_t map_proc_client(UNUSED void *mod_inst, UNUSED void *proc_inst
 	REXDENT();
 
 finish:
-	return rcode;
+	RETURN_MODULE_RCODE(rcode);
 }
 
 static xlat_arg_parser_t const xlat_client_args[] = {
@@ -231,12 +233,12 @@ static xlat_arg_parser_t const xlat_client_args[] = {
  */
 static xlat_action_t xlat_client(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 UNUSED xlat_ctx_t const *xctx,
-				 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				 request_t *request, fr_value_box_list_t *in)
 {
 	char const	*value = NULL;
 	fr_ipaddr_t	ip;
 	CONF_PAIR	*cp;
-	RADCLIENT	*client = NULL;
+	fr_client_t	*client = NULL;
 	fr_value_box_t	*field = fr_value_box_list_head(in);
 	fr_value_box_t	*client_ip = fr_value_box_list_next(in, field);
 	fr_value_box_t	*vb;
@@ -292,7 +294,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, UNU
 	char const	*value;
 	CONF_PAIR	*cp;
 	char		buffer[2048];
-	RADCLIENT	*client;
+	fr_client_t	*client;
 
 	/*
 	 *	Ensure we're only being called from the main thread,
@@ -352,9 +354,8 @@ static int mod_load(void)
 {
 	xlat_t	*xlat;
 
-	xlat = xlat_register(NULL, "client", xlat_client, FR_TYPE_STRING, NULL);
-	if (!xlat) return -1;
-	xlat_func_args(xlat, xlat_client_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "client", xlat_client, FR_TYPE_STRING)) == NULL)) return -1;
+	xlat_func_args_set(xlat, xlat_client_args);
 
 	map_proc_register(NULL, "client", map_proc_client, NULL, 0);
 
@@ -363,7 +364,7 @@ static int mod_load(void)
 
 static void mod_unload(void)
 {
-	xlat_unregister("client");
+	xlat_func_unregister("client");
 }
 
 /*

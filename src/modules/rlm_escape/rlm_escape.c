@@ -21,6 +21,7 @@
  *
  * @copyright 2018 Arran Cudbard-Bell (a.cudbardb@freeradius.org)
  */
+#include "lib/unlang/xlat.h"
 RCSID("$Id$")
 USES_APPLE_DEPRECATED_API
 
@@ -28,6 +29,7 @@ USES_APPLE_DEPRECATED_API
 
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include <ctype.h>
 
@@ -45,7 +47,10 @@ static const CONF_PARSER module_config[] = {
 
 static char const hextab[] = "0123456789abcdef";
 
-static xlat_arg_parser_t const escape_xlat_arg = { .required = true, .concat = true, .type = FR_TYPE_STRING };
+static xlat_arg_parser_t const escape_xlat_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	XLAT_ARG_PARSER_TERMINATOR
+};
 
 /** Equivalent to the old safe_characters functionality in rlm_sql but with utf8 support
  *
@@ -58,7 +63,7 @@ static xlat_arg_parser_t const escape_xlat_arg = { .required = true, .concat = t
  */
 static xlat_action_t escape_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 xlat_ctx_t const *xctx,
-				 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				 request_t *request, fr_value_box_list_t *in)
 {
 	rlm_escape_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_escape_t);
 	fr_value_box_t		*arg = fr_value_box_list_head(in);
@@ -116,7 +121,10 @@ static xlat_action_t escape_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	return XLAT_ACTION_DONE;
 }
 
-static xlat_arg_parser_t const unescape_xlat_arg = { .required = true, .concat = true, .type = FR_TYPE_STRING };
+static xlat_arg_parser_t const unescape_xlat_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	XLAT_ARG_PARSER_TERMINATOR
+};
 
 /** Equivalent to the old safe_characters functionality in rlm_sql
  *
@@ -129,7 +137,7 @@ static xlat_arg_parser_t const unescape_xlat_arg = { .required = true, .concat =
  */
 static xlat_action_t unescape_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				   UNUSED xlat_ctx_t const *xctx,
-				   request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				   request_t *request, fr_value_box_list_t *in)
 {
 	fr_value_box_t	*arg = fr_value_box_list_head(in);
 	char const	*p, *end;
@@ -185,16 +193,15 @@ static xlat_action_t unescape_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
  */
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
-	char		*unescape;
 	xlat_t		*xlat;
 
-	MEM(unescape = talloc_asprintf(NULL, "un%s", mctx->inst->name));
-	xlat = xlat_register_module(NULL, mctx, mctx->inst->name, escape_xlat, FR_TYPE_STRING, XLAT_FLAG_PURE);
-	xlat_func_mono(xlat, &escape_xlat_arg);
+	xlat = xlat_func_register_module(NULL, mctx, "escape", escape_xlat, FR_TYPE_STRING);
+	xlat_func_mono_set(xlat, escape_xlat_arg);
+	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
-	xlat = xlat_register_module(NULL, mctx, unescape, unescape_xlat, FR_TYPE_STRING, XLAT_FLAG_PURE);
-	xlat_func_mono(xlat, &unescape_xlat_arg);
-	talloc_free(unescape);
+	xlat = xlat_func_register_module(NULL, mctx, "unescape", unescape_xlat, FR_TYPE_STRING);
+	xlat_func_mono_set(xlat, unescape_xlat_arg);
+	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
 	return 0;
 }

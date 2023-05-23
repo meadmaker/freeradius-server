@@ -63,7 +63,7 @@ xlat_arg_parser_t const trigger_xlat_args[] = {
  */
 xlat_action_t trigger_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			   UNUSED xlat_ctx_t const *xctx,
-			   request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			   request_t *request, fr_value_box_list_t *in)
 {
 	fr_pair_list_t		*head = NULL;
 	fr_dict_attr_t const	*da;
@@ -187,7 +187,7 @@ bool trigger_enabled(void)
 typedef struct {
 	char			*command;	//!< Name of the trigger.
 	xlat_exp_head_t		*xlat;		//!< xlat representation of the trigger args.
-	FR_DLIST_HEAD(fr_value_box_list)	args;		//!< Arguments to pass to the trigger exec.
+	fr_value_box_list_t	args;		//!< Arguments to pass to the trigger exec.
 
 	fr_exec_state_t		exec;		//!< Used for asynchronous execution.
 	fr_time_delta_t		timeout;	//!< How long the trigger has to run.
@@ -219,10 +219,10 @@ static unlang_action_t trigger_resume(rlm_rcode_t *p_result, UNUSED int *priorit
 	}
 
 	/*
-	 *	fr_exec_start just calls request_resume when it's
+	 *	fr_exec_oneshot just calls request_resume when it's
 	 *	done.
 	 */
-	if (fr_exec_start(request, &trigger->exec, request,
+	if (fr_exec_oneshot(request, &trigger->exec, request,
 	                  &trigger->args,
 	                  NULL, false, true,
 	                  false,
@@ -239,7 +239,7 @@ static unlang_action_t trigger_resume(rlm_rcode_t *p_result, UNUSED int *priorit
 	 *	gets called repeatedly.
 	 */
 	if (unlang_function_repeat_set(request, trigger_done) < 0) {
-		fr_exec_cleanup(&trigger->exec, SIGKILL);
+		fr_exec_oneshot_cleanup(&trigger->exec, SIGKILL);
 		goto fail;
 	}
 
@@ -468,7 +468,7 @@ int trigger_exec(unlang_interpret_t *intp,
 	}
 
 	if (unlang_function_push(request, trigger_run, trigger_resume,
-				 NULL, UNLANG_TOP_FRAME, trigger) < 0) goto error;
+				 NULL, 0, UNLANG_TOP_FRAME, trigger) < 0) goto error;
 
 	if (!intp) {
 		/*

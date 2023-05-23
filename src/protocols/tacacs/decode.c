@@ -44,31 +44,31 @@ int fr_tacacs_packet_to_code(fr_tacacs_packet_t const *pkt)
 
 			if (pkt->authen_cont.flags == FR_TAC_PLUS_CONTINUE_FLAG_ABORT) return FR_PACKET_TYPE_VALUE_AUTHENTICATION_CONTINUE_ABORT;
 
-			fr_strerror_const("Invalid TACACS+ value for authentication continue flag");
+			fr_strerror_printf("Invalid value %u for authentication continue flag", pkt->authen_cont.flags);
 			return -1;
 		}
 
 		switch (pkt->authen_reply.status) {
 		case FR_TAC_PLUS_AUTHEN_STATUS_PASS:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_PASS;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_PASS;
 
 		case FR_TAC_PLUS_AUTHEN_STATUS_FAIL:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_FAIL;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_FAIL;
 
 		case FR_TAC_PLUS_AUTHEN_STATUS_GETDATA:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETDATA;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETDATA;
 
 		case FR_TAC_PLUS_AUTHEN_STATUS_GETUSER:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETUSER;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETUSER;
 
 		case FR_TAC_PLUS_AUTHEN_STATUS_GETPASS:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETPASS;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETPASS;
 
 		case FR_TAC_PLUS_AUTHEN_STATUS_RESTART:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_RESTART;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_RESTART;
 
 		case FR_TAC_PLUS_AUTHEN_STATUS_ERROR:
-			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_ERROR;
+			return FR_PACKET_TYPE_VALUE_AUTHENTICATION_ERROR;
 
 		default:
 			break;
@@ -84,13 +84,13 @@ int fr_tacacs_packet_to_code(fr_tacacs_packet_t const *pkt)
 
 		switch (pkt->author_reply.status) {
 		case FR_TAC_PLUS_AUTHOR_STATUS_PASS_ADD:
-			return FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_PASS_ADD;
+			return FR_PACKET_TYPE_VALUE_AUTHORIZATION_PASS_ADD;
 
 		case FR_TAC_PLUS_AUTHOR_STATUS_PASS_REPL:
-			return FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_PASS_REPLACE;
+			return FR_PACKET_TYPE_VALUE_AUTHORIZATION_PASS_REPLACE;
 
 		case FR_TAC_PLUS_AUTHOR_STATUS_FAIL:
-			return FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_FAIL;
+			return FR_PACKET_TYPE_VALUE_AUTHORIZATION_FAIL;
 
 		default:
 			break;
@@ -106,10 +106,10 @@ int fr_tacacs_packet_to_code(fr_tacacs_packet_t const *pkt)
 
 		switch (pkt->acct_reply.status) {
 		case FR_TAC_PLUS_ACCT_STATUS_SUCCESS:
-			return FR_PACKET_TYPE_VALUE_ACCOUNTING_REPLY_SUCCESS;
+			return FR_PACKET_TYPE_VALUE_ACCOUNTING_SUCCESS;
 
 		case FR_TAC_PLUS_ACCT_STATUS_ERROR:
-			return FR_PACKET_TYPE_VALUE_ACCOUNTING_REPLY_ERROR;
+			return FR_PACKET_TYPE_VALUE_ACCOUNTING_ERROR;
 
 		default:
 			break;
@@ -119,24 +119,41 @@ int fr_tacacs_packet_to_code(fr_tacacs_packet_t const *pkt)
 		return -1;
 
 	default:
-		fr_strerror_const("Invalid TACACS+ header type");
+		fr_strerror_const("Invalid header type");
 		return -1;
 	}
 }
 
-#define PACKET_HEADER_CHECK(_msg) do { \
-	if (p > end) { \
+#define PACKET_HEADER_CHECK(_msg, _hdr) do { \
+	p = buffer + FR_HEADER_LENGTH; \
+	if (sizeof(_hdr) > (size_t) (end - p)) { \
 		fr_strerror_printf("Header for %s is too small (%zu < %zu)", _msg, end - (uint8_t const *) pkt, p - (uint8_t const *) pkt); \
 		goto fail; \
 	} \
+	body = p + sizeof(_hdr); \
+	data_len = sizeof(_hdr); \
 } while (0)
 
-#define ARG_COUNT_CHECK(_msg, _arg_cnt) do { \
-	if ((p + _arg_cnt) > end) { \
-		fr_strerror_printf("Argument count %u overflows the remaining data in the %s packet", _arg_cnt, _msg); \
+/*
+ *	Check argv[i] after the user_msg / server_msg / argc lengths have been added to data_len
+ */
+#define ARG_COUNT_CHECK(_msg, _hdr) do { \
+	fr_assert(p == (uint8_t const *) &(_hdr)); \
+	if (data_len > (size_t) (end - p)) { \
+		fr_strerror_printf("Argument count %u overflows the remaining data (%zu) in the %s packet", _hdr.arg_cnt, end - p, _msg); \
 		goto fail; \
 	} \
-	p += _arg_cnt; \
+	argv = body; \
+	attrs = buffer + FR_HEADER_LENGTH + data_len; \
+	body += _hdr.arg_cnt; \
+	p = attrs; \
+	for (int i = 0; i < _hdr.arg_cnt; i++) { \
+		if (_hdr.arg_len[i] > (size_t) (end - p)) { \
+			fr_strerror_printf("Argument %u length %u overflows packet", i, _hdr.arg_len[i]); \
+			goto fail; \
+		} \
+		p += _hdr.arg_len[i]; \
+	} \
 } while (0)
 
 #define DECODE_FIELD_UINT8(_da, _field) do { \
@@ -158,39 +175,40 @@ int fr_tacacs_packet_to_code(fr_tacacs_packet_t const *pkt)
 
 #define BODY(_x) (((uint8_t const *) pkt) + sizeof(pkt->hdr) + sizeof(pkt->_x))
 
-/**
- *	Decode a TACACS+ 'arg_N' fields.
+/** Decode a TACACS+ 'arg_N' fields.
+ *
  */
 static int tacacs_decode_args(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr_t const *parent,
-			      uint8_t arg_cnt, uint8_t const *arg_list, uint8_t const *data, uint8_t const *end)
+			      uint8_t arg_cnt, uint8_t const *argv, uint8_t const *attrs, NDEBUG_UNUSED uint8_t const *end)
 {
 	uint8_t i;
-	uint8_t const *p = data;
+	bool append = false;
+	uint8_t const *p = attrs;
 	fr_pair_t *vp;
+	fr_pair_t *vendor = NULL;
+	fr_dict_attr_t const *root;
 
 	/*
 	 *	No one? Just get out!
 	 */
 	if (!arg_cnt) return 0;
 
-	if ((p + arg_cnt) > end) {
-		fr_strerror_printf("Argument count %u overflows the remaining data in the packet", arg_cnt);
-		return -1;
-	}
-
 	/*
-	 *	Check for malformed packets before anything else.
+	 *	Try to decode as nested attributes.  If we can't, everything is
+	 *
+	 *		Argument-List = "foo=bar"
 	 */
-	for (i = 0; i < arg_cnt; i++) {
-		if ((p + arg_list[i]) > end) {
-			fr_strerror_printf("'%s' argument %u length %u overflows the remaining data (%zu) in the packet",
-					   parent->name, i, arg_list[i], end - p);
-			return -1;
-		}
+	if (parent) {
+		vendor = fr_pair_find_by_da(out, NULL, parent);
+		if (!vendor) {
+			vendor = fr_pair_afrom_da(ctx, parent);
+			if (!vendor) return -1;
 
-		p += arg_list[i];
+			append = true;
+		}
 	}
-	p = data;
+
+	root = fr_dict_root(dict_tacacs);
 
 	/*
 	 *	Then, do the dirty job of creating attributes.
@@ -198,14 +216,17 @@ static int tacacs_decode_args(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr
 	for (i = 0; i < arg_cnt; i++) {
 		uint8_t const *value, *name_end, *arg_end;
 		fr_dict_attr_t const *da;
+		fr_pair_list_t *dst;
 		uint8_t buffer[256];
 
-		if (arg_list[i] < 2) goto next; /* skip malformed */
+		fr_assert((p + argv[i]) <= end);
 
-		memcpy(buffer, p, arg_list[i]);
-		buffer[arg_list[i]] = '\0';
+		if (argv[i] < 2) goto next; /* skip malformed */
 
-		arg_end = buffer + arg_list[i];
+		memcpy(buffer, p, argv[i]);
+		buffer[argv[i]] = '\0';
+
+		arg_end = buffer + argv[i];
 
 		for (value = buffer, name_end = NULL; value < arg_end; value++) {
 			/*
@@ -227,70 +248,118 @@ static int tacacs_decode_args(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr
 		 */
 		if (!name_end) goto next;
 
-		da = fr_dict_attr_by_name(NULL, fr_dict_root(dict_tacacs), (char *) buffer);
-		if (!da) {
-		raw:
-			/*
-			 *	Dupe the whole thing so that we have:
-			 *
-			 *	Argument-List += "name=value"
-			 */
-			da = parent;
-			value = p;
-			arg_end = p + arg_list[i];
-		}
+		/*
+		 *	Prefer to decode from the attribute root, first.
+		 */
+		da = fr_dict_attr_by_name(NULL, root, (char *) buffer);
+		if (da) {
+			vp = fr_pair_afrom_da(ctx, da);
+			if (!vp) goto oom;
 
-		vp = fr_pair_afrom_da(ctx, da);
-		if (!vp) {
-			fr_strerror_const("Out of Memory");
-			return -1;
-
+			dst = out;
+			goto decode;
 		}
 
 		/*
-		 *	If it's OCTETS or STRING type, then just copy
-		 *	the value verbatim.  But if it's zero length,
-		 *	then don't do anything.
-		 *
-		 *	Note that we copy things manually here because
-		 *	we don't want the OCTETS type to be parsed as
-		 *	hex.  And, we don't want the string type to be
-		 *	unescaped.
+		 *	If the attribute isn't in the main dictionary,
+		 *	maybe it's in the vendor dictionary?
 		 */
-		if (da->type == FR_TYPE_OCTETS) {
-			if ((arg_end > value) &&
-			    (fr_pair_value_memdup(vp, value, arg_end - value, true) < 0)) {
-				goto fail;
+		if (vendor) {
+			da = fr_dict_attr_by_name(NULL, parent, (char *) buffer);
+			if (!da) goto raw;
+
+			vp = fr_pair_afrom_da(vendor, da);
+			if (!vp) goto oom;
+
+			dst = &vendor->vp_group;
+
+		decode:
+			/*
+			 *      If it's OCTETS or STRING type, then just copy the value verbatim, as the
+			 *      contents are (should be?) binary-safe.  But if it's zero length, then don't need to
+			 *      copy anything.
+			 *
+			 *      Note that we copy things manually here because
+			 *      we don't want the OCTETS type to be parsed as
+			 *      hex.  And, we don't want the string type to be
+			 *      unescaped.
+			 */
+			if (da->type == FR_TYPE_OCTETS) {
+				if ((arg_end > value) &&
+				    (fr_pair_value_memdup(vp, value, arg_end - value, true) < 0)) {
+					goto fail;
+				}
+
+			} else if (da->type == FR_TYPE_STRING) {
+				if ((arg_end > value) &&
+				    (fr_pair_value_bstrndup(vp, (char const *) value, arg_end - value, true) < 0)) {
+					goto fail;
+				}
+
+			} else if (arg_end == value) {
+				/*
+				 *	Any other leaf type MUST have non-zero contents.
+				 */
+				talloc_free(vp);
+				goto raw;
+
+			} else {
+				/*
+				 *      Parse the string, and try to convert it to the
+				 *      underlying data type.  If it can't be
+				 *      converted as a data type, just convert it as
+				 *      Argument-List.
+				 *
+				 *      And if that fails, just ignore it completely.
+				 */
+				if (fr_pair_value_from_str(vp, (char const *) value, arg_end - value, NULL, true) < 0) {
+					talloc_free(vp);
+					goto raw;
+				}
+
+				/*
+				 *	Else it parsed fine, append it to the output vendor list.
+				 */
 			}
 
-		} else if (da->type == FR_TYPE_STRING) {
+			fr_pair_append(dst, vp);
+
+		} else {
+		raw:
+			vp = fr_pair_afrom_da(ctx, attr_tacacs_argument_list);
+			if (!vp) {
+			oom:
+				fr_strerror_const("Out of Memory");
+			fail:
+				if (append) {
+					talloc_free(vendor);
+				} else {
+					talloc_free(vp);
+				}
+				return -1;
+			}
+
+			value = p;
+			arg_end = p + argv[i];
+
 			if ((arg_end > value) &&
 			    (fr_pair_value_bstrndup(vp, (char const *) value, arg_end - value, true) < 0)) {
 				goto fail;
 			}
 
-		} else {
-			/*
-			 *	Parse the string, and try to convert it to the
-			 *	underlying data type.  If it can't be
-			 *	converted as a data type, just convert it as
-			 *	Argument-List.
-			 *
-			 *	And if that fails, just ignore it completely.
-			 */
-			if (fr_pair_value_from_str(vp, (char const *) value, arg_end - value, NULL, true) < 0) {
-			fail:
-				talloc_free(vp);
-				if (da != parent) goto raw;
-
-				goto next;
-			}
+			fr_pair_append(out, vp);
 		}
 
-		fr_pair_append(out, vp);
-
 	next:
-		p += arg_list[i];
+		p += argv[i];
+	}
+
+	if (append) {
+		if (fr_pair_list_num_elements(&vendor->vp_group) > 0) {
+			fr_pair_append(out, vendor);
+		} else {
+			talloc_free(vendor);
+		}
 	}
 
 	return 0;
@@ -307,7 +376,7 @@ static int tacacs_decode_field(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_att
 
 	if ((p + field_len) > end) {
 		fr_strerror_printf("'%s' length %u overflows the remaining data (%zu) in the packet",
-				   da->name, field_len, p - end);
+				   da->name, field_len, end - p);
 		return -1;
 	}
 
@@ -337,12 +406,14 @@ static int tacacs_decode_field(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_att
 /**
  *	Decode a TACACS+ packet
  */
-ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *buffer, size_t buffer_len,
-			 const uint8_t *original, char const * const secret, size_t secret_len)
+ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr_t const *vendor,
+			 uint8_t const *buffer, size_t buffer_len,
+			 const uint8_t *original, char const * const secret, size_t secret_len, int *code)
 {
 	fr_tacacs_packet_t const *pkt;
 	fr_pair_t		*vp;
-	uint8_t const  		*p, *end;
+	size_t			data_len;
+	uint8_t const  		*p, *body, *argv, *attrs, *end;
 	uint8_t			*decrypted = NULL;
 
 	/*
@@ -361,6 +432,16 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 	 * +----------------+----------------+----------------+----------------+
 	 */
 	pkt = (fr_tacacs_packet_t const *) buffer;
+
+	/*
+	 *	p	miscellaneous pointer for decoding things
+	 *	body	points to just past the (randomly sized) per-packet header,
+	 *		where the various user / server messages are.
+	 *		sometimes this is after "argv".
+	 *	argv	points to the array of argv[i] length entries
+	 *	attrs	points to the attributes we need to decode as "foo=bar".
+	 */
+	argv = attrs = NULL;
 	end = buffer + buffer_len;
 
 	/*
@@ -375,8 +456,8 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 	/*
 	 *	TACACS major / minor version MUST be 12.0 or 12.1
 	 */
-	if (!((buffer[0] == 0xc0) || (buffer[0] == 0xc1))) {
-		fr_strerror_printf("Unsupported TACACS+ version %02x", buffer[0]);
+	if (!(pkt->hdr.ver.major == 12 && (pkt->hdr.ver.minor == 0 || pkt->hdr.ver.minor == 1))) {
+		fr_strerror_printf("Unsupported TACACS+ version %d.%d (%02x)", pkt->hdr.ver.major, pkt->hdr.ver.minor, buffer[0]);
 		return -1;
 	}
 
@@ -420,6 +501,11 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 		return -1;
 	}
 
+	if (!secret && packet_is_encrypted(pkt)) {
+		fr_strerror_const("Packet is encrypted, but there is no secret to decrypt it");
+		return -1;
+	}
+
 	/*
 	 *	Call the struct encoder to do the actual work.
 	 */
@@ -431,13 +517,13 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 	/*
 	 *	3.6. Encryption
 	 *
-	 *	Packets are encrypted if the unencrypted flag is clear.
+	 *	If there's a secret, we alway decrypt the packets.
 	 */
-	if ((pkt->hdr.flags & FR_TAC_PLUS_UNENCRYPTED_FLAG) == 0) {
+	if (secret && packet_is_encrypted(pkt)) {
 		size_t length;
 
-		if (!secret || secret_len < 1) {
-			fr_strerror_const("Packet is encrypted, but no secret is set.");
+		if (!secret_len) {
+			fr_strerror_const("Packet should be encrypted, but the secret has zero length");
 			return -1;
 		}
 
@@ -445,6 +531,8 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 
 		/*
 		 *	We need that to decrypt the body content.
+		 *
+		 *	@todo - use thread-local storage to avoid allocations?
 		 */
 		decrypted = talloc_memdup(ctx, buffer, buffer_len);
 		if (!decrypted) {
@@ -461,9 +549,16 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			return -1;
 		}
 
-		decrypted[3] |= 0x01; /* say it's decrypted */
+		decrypted[3] |= FR_TAC_PLUS_UNENCRYPTED_FLAG;
 
 		FR_PROTO_HEX_DUMP(decrypted, buffer_len, "fr_tacacs_packet_t (unencrypted)");
+
+		if (code) {
+			*code = fr_tacacs_packet_to_code((fr_tacacs_packet_t const *) decrypted);
+			if (*code < 0) goto fail;
+		}
+
+		buffer = decrypted;
 	}
 
 #ifndef NDEBUG
@@ -474,6 +569,8 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 	case FR_TAC_PLUS_AUTHEN:
 		if (packet_is_authen_start_request(pkt)) {
 			uint8_t want;
+			bool raw;
+			fr_dict_attr_t const *da, *challenge;
 
 			/**
 			 * 4.1. The Authentication START Packet Body
@@ -493,12 +590,25 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			 * |    data...
 			 * +----------------+----------------+----------------+----------------+
 			 */
-			p = BODY(authen_start);
-			PACKET_HEADER_CHECK("Authentication Start");
+			PACKET_HEADER_CHECK("Authentication-Start", pkt->authen_start);
 
-			if ((pkt->hdr.ver.minor == 0) &&
-			    (pkt->authen_start.authen_type != FR_AUTHENTICATION_TYPE_VALUE_ASCII)) {
-				fr_strerror_const("TACACS+ minor version 1 MUST be used for non-ASCII authentication methods");
+			data_len += p[4] + p[5] + p[6] + p[7];
+			if (data_len > (size_t) (end - p)) {
+			overflow:
+				if ((buffer[3] & FR_TAC_PLUS_UNENCRYPTED_FLAG) == 0) {
+				bad_secret:
+					fr_strerror_const("Invalid packet after decryption - is the secret key incorrect?");
+					goto fail;
+				}
+
+				fr_strerror_const("Data overflows the packet");
+				goto fail;
+			}
+			if (data_len < (size_t) (end - p)) {
+			underflow:
+				if ((buffer[3] & FR_TAC_PLUS_UNENCRYPTED_FLAG) == 0) goto bad_secret;
+
+				fr_strerror_const("Data underflows the packet");
 				goto fail;
 			}
 
@@ -515,6 +625,7 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 4 fields, based on their "length"
 			 */
+			p = body;
 			DECODE_FIELD_STRING8(attr_tacacs_user_name, pkt->authen_start.user_len);
 			DECODE_FIELD_STRING8(attr_tacacs_client_port, pkt->authen_start.port_len);
 			DECODE_FIELD_STRING8(attr_tacacs_remote_address, pkt->authen_start.rem_addr_len);
@@ -523,42 +634,97 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			 *	Check the length on the various
 			 *	authentication types.
 			 */
+			raw = false;
+			challenge = NULL;
+
 			switch (pkt->authen_start.authen_type) {
 			default:
-				want = 255;
+				raw = true;
+				want = pkt->authen_start.data_len;
+				da = attr_tacacs_data;
+				break;
+
+			case FR_AUTHENTICATION_TYPE_VALUE_PAP:
+				want = pkt->authen_start.data_len;
+				da = attr_tacacs_user_password;
 				break;
 
 			case FR_AUTHENTICATION_TYPE_VALUE_CHAP:
-				want = 1 + 8 + 16; /* id + 8 octets of challenge + 16 hash */
+				want = 1 + 16; /* id + HOPEFULLY 8 octets of challenge + 16 hash */
+				da = attr_tacacs_chap_password;
+				challenge = attr_tacacs_chap_challenge;
 				break;
 
 			case FR_AUTHENTICATION_TYPE_VALUE_MSCHAP:
-				want = 1 + 8 + 49; /* id + 8 octets of challenge + 49 MS-CHAP stuff */
+				want = 1 + 49; /* id + HOPEFULLY 8 octets of challenge + 49 MS-CHAP stuff */
+				da = attr_tacacs_mschap_response;
+				challenge = attr_tacacs_mschap_challenge;
 				break;
 
 			case FR_AUTHENTICATION_TYPE_VALUE_MSCHAPV2:
-				want = 1 + 16 + 49; /* id + 16 octets of challenge + 49 MS-CHAP stuff */
+				want = 1 + 49; /* id + HOPEFULLY 16 octets of challenge + 49 MS-CHAP stuff */
+				da = attr_tacacs_mschap2_response;
+				challenge = attr_tacacs_mschap_challenge;
 				break;
 			}
 
 			/*
 			 *	If we have enough data, decode it as
 			 *	the claimed authentication type.
-			 *	Otherwise, decode it as an unknown
+			 *
+			 *	Otherwise, decode the entire field as an unknown
 			 *	attribute.
 			 */
-			if (pkt->authen_start.data_len <= want) {
-				DECODE_FIELD_STRING8(attr_tacacs_data, pkt->authen_start.data_len);
-			} else {
-				fr_dict_attr_t *da;
+			if (raw || (pkt->authen_start.data_len < want)) {
+				fr_dict_attr_t *da_unknown;
 
-				da = fr_dict_unknown_attr_afrom_da(ctx, attr_tacacs_data);
-				if (da) {
-					da->flags.is_raw = 1;
-					DECODE_FIELD_STRING8(da, pkt->authen_start.data_len);
-					talloc_free(da); /* the VP makes it's own copy */
-				}
+				da_unknown = fr_dict_unknown_attr_afrom_da(ctx, attr_tacacs_data);
+				if (!da_unknown) goto fail;
 
+				da_unknown->flags.is_raw = 1;
+				want = pkt->authen_start.data_len;
+
+				DECODE_FIELD_STRING8(da_unknown, want);
+				talloc_free(da_unknown);
+
+			} else if (!challenge) {
+				DECODE_FIELD_STRING8(da, want);
+
+			} else if (pkt->authen_start.data_len == want)  {
+				fr_strerror_printf("%s has zero length", challenge->name);
+				goto fail;
+
+			} else { /* 1 of ID + ??? of challenge + (want-1) of data */
+				uint8_t challenge_len = pkt->authen_start.data_len - want;
+				uint8_t hash[50];
+
+				/*
+				 *	Rework things to make sense.
+				 */
+				hash[0] = p[0];
+				memcpy(hash + 1, p + 1 + challenge_len, want - 1);
+
+				vp = fr_pair_afrom_da(ctx, da);
+				if (!vp) goto fail;
+
+				fr_pair_append(out, vp);
+
+				/*
+				 *	ID + hash
+				 */
+				if (fr_pair_value_memdup(vp, hash, want, true) < 0) goto fail;
+
+				/*
+				 *	And then the challenge.
+				 */
+				vp = fr_pair_afrom_da(ctx, challenge);
+				if (!vp) goto fail;
+
+				fr_pair_append(out, vp);
+
+				if (fr_pair_value_memdup(vp, p + 1, challenge_len, true) < 0) goto fail;
+
+				p += pkt->authen_start.data_len;
 			}
 
 		} else if (packet_is_authen_continue(pkt)) {
@@ -588,19 +754,17 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 				goto fail;
 			}
 
-			p = BODY(authen_cont);
-			PACKET_HEADER_CHECK("Authentication Continue");
-
-			if (pkt->authen_start.authen_type != FR_AUTHENTICATION_TYPE_VALUE_ASCII) {
-				fr_strerror_const("Authentication-Continue packets MUST NOT be used for PAP, CHAP, MS-CHAP");
-				goto fail;
-			}
+			PACKET_HEADER_CHECK("Authentication-Continue", pkt->authen_cont);
+			data_len += fr_nbo_to_uint16(p) + fr_nbo_to_uint16(p + 2);
+			if (data_len > (size_t) (end - p)) goto overflow;
+			if (data_len < (size_t) (end - p)) goto underflow;
 
 			DECODE_FIELD_UINT8(attr_tacacs_packet_body_type, FR_PACKET_BODY_TYPE_CONTINUE);
 
 			/*
 			 *	Decode 2 fields, based on their "length"
 			 */
+			p = body;
 			DECODE_FIELD_STRING16(attr_tacacs_user_message, pkt->authen_cont.user_msg_len);
 			DECODE_FIELD_STRING16(attr_tacacs_data, pkt->authen_cont.data_len);
 
@@ -627,9 +791,11 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			 *	We don't care about versions for replies.
 			 *	We just echo whatever was sent in the request.
 			 */
+			PACKET_HEADER_CHECK("Authentication-Reply", pkt->authen_reply);
+			data_len += fr_nbo_to_uint16(p + 2) + fr_nbo_to_uint16(p + 4);
+			if (data_len > (size_t) (end - p)) goto overflow;
+			if (data_len < (size_t) (end - p)) goto underflow;
 
-			p = BODY(authen_reply);
-			PACKET_HEADER_CHECK("Authentication Reply");
 			DECODE_FIELD_UINT8(attr_tacacs_packet_body_type, FR_PACKET_BODY_TYPE_REPLY);
 
 			DECODE_FIELD_UINT8(attr_tacacs_authentication_status, pkt->authen_reply.status);
@@ -638,6 +804,7 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 2 fields, based on their "length"
 			 */
+			p = body;
 			DECODE_FIELD_STRING16(attr_tacacs_server_message, pkt->authen_reply.server_msg_len);
 			DECODE_FIELD_STRING16(attr_tacacs_data, pkt->authen_reply.data_len);
 
@@ -678,9 +845,11 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 
 			if (pkt->hdr.ver.minor != 0) goto invalid_version;
 
-			p = BODY(author_req);
-			PACKET_HEADER_CHECK("Authorization REQUEST");
-			ARG_COUNT_CHECK("Authorization REQUEST", pkt->author_req.arg_cnt);
+			PACKET_HEADER_CHECK("Authorization-Request", pkt->author_req);
+			data_len += p[4] + p[5] + p[6] + p[7];
+
+			ARG_COUNT_CHECK("Authorization-Request", pkt->author_req);
+
 			DECODE_FIELD_UINT8(attr_tacacs_packet_body_type, FR_PACKET_BODY_TYPE_REQUEST);
 
 			/*
@@ -694,6 +863,7 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 3 fields, based on their "length"
 			 */
+			p = body;
 			DECODE_FIELD_STRING8(attr_tacacs_user_name, pkt->author_req.user_len);
 			DECODE_FIELD_STRING8(attr_tacacs_client_port, pkt->author_req.port_len);
 			DECODE_FIELD_STRING8(attr_tacacs_remote_address, pkt->author_req.rem_addr_len);
@@ -701,8 +871,8 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 'arg_N' arguments (horrible format)
 			 */
-			if (tacacs_decode_args(ctx, out, attr_tacacs_argument_list,
-					       pkt->author_req.arg_cnt, BODY(author_req), p, end) < 0) goto fail;
+			if (tacacs_decode_args(ctx, out, vendor,
+					       pkt->author_req.arg_cnt, argv, attrs, end) < 0) goto fail;
 
 		} else if (packet_is_author_reply(pkt)) {
 			/*
@@ -733,9 +903,10 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			 *	We just echo whatever was sent in the request.
 			 */
 
-			p = BODY(author_reply);
-			PACKET_HEADER_CHECK("Authorization RESPONSE");
-			ARG_COUNT_CHECK("Authorization REQUEST", pkt->author_reply.arg_cnt);
+			PACKET_HEADER_CHECK("Authorization-Reply", pkt->author_reply);
+			data_len += p[1] + fr_nbo_to_uint16(p + 2) + fr_nbo_to_uint16(p + 4);
+
+			ARG_COUNT_CHECK("Authorization-Reply", pkt->author_reply);
 			DECODE_FIELD_UINT8(attr_tacacs_packet_body_type, FR_PACKET_BODY_TYPE_RESPONSE);
 
 			/*
@@ -746,14 +917,15 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 2 fields, based on their "length"
 			 */
+			p = body;
 			DECODE_FIELD_STRING16(attr_tacacs_server_message, pkt->author_reply.server_msg_len);
 			DECODE_FIELD_STRING16(attr_tacacs_data, pkt->author_reply.data_len);
 
 			/*
 			 *	Decode 'arg_N' arguments (horrible format)
 			 */
-			if (tacacs_decode_args(ctx, out, attr_tacacs_argument_list,
-					pkt->author_reply.arg_cnt, BODY(author_reply), p, end) < 0) goto fail;
+			if (tacacs_decode_args(ctx, out, vendor,
+					       pkt->author_reply.arg_cnt, argv, attrs, end) < 0) goto fail;
 
 		} else {
 			fr_strerror_const("Unknown authorization packet");
@@ -792,9 +964,13 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 
 			if (pkt->hdr.ver.minor != 0) goto invalid_version;
 
-			p = BODY(acct_req);
-			PACKET_HEADER_CHECK("Accounting REQUEST");
-			ARG_COUNT_CHECK("Accounting REQUEST", pkt->acct_req.arg_cnt);
+			PACKET_HEADER_CHECK("Accounting-Request", pkt->acct_req);
+			data_len += p[5] + p[6] + p[7] + p[8];
+			if (data_len > (size_t) (end - p)) goto overflow;
+			/* can't check for underflow, as we have argv[argc] */
+
+			ARG_COUNT_CHECK("Accounting-Request", pkt->acct_req);
+
 			DECODE_FIELD_UINT8(attr_tacacs_packet_body_type, FR_PACKET_BODY_TYPE_REQUEST);
 
 			/*
@@ -809,6 +985,7 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 3 fields, based on their "length"
 			 */
+			p = body;
 			DECODE_FIELD_STRING8(attr_tacacs_user_name, pkt->acct_req.user_len);
 			DECODE_FIELD_STRING8(attr_tacacs_client_port, pkt->acct_req.port_len);
 			DECODE_FIELD_STRING8(attr_tacacs_remote_address, pkt->acct_req.rem_addr_len);
@@ -816,8 +993,8 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			/*
 			 *	Decode 'arg_N' arguments (horrible format)
 			 */
-			if (tacacs_decode_args(ctx, out, attr_tacacs_argument_list,
-					pkt->acct_req.arg_cnt, BODY(acct_req), p, end) < 0) goto fail;
+			if (tacacs_decode_args(ctx, out, vendor,
+					       pkt->acct_req.arg_cnt, argv, attrs, end) < 0) goto fail;
 
 		} else if (packet_is_acct_reply(pkt)) {
 			/**
@@ -838,8 +1015,12 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 			 *	We just echo whatever was sent in the request.
 			 */
 
+			PACKET_HEADER_CHECK("Accounting-Reply", pkt->acct_reply);
+			data_len += fr_nbo_to_uint16(p) + fr_nbo_to_uint16(p + 2);
+			if (data_len > (size_t) (end - p)) goto overflow;
+			if (data_len < (size_t) (end - p)) goto underflow;
+
 			p = BODY(acct_reply);
-			PACKET_HEADER_CHECK("Accounting REPLY");
 			DECODE_FIELD_UINT8(attr_tacacs_packet_body_type, FR_PACKET_BODY_TYPE_REPLY);
 
 			/*
@@ -856,7 +1037,7 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 		}
 		break;
 	default:
-		fr_strerror_printf("decode: Unsupported TACACS+ type %u", pkt->hdr.type);
+		fr_strerror_printf("decode: Unsupported packet type %u", pkt->hdr.type);
 		goto fail;
 	}
 
@@ -870,9 +1051,13 @@ ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *bu
 static ssize_t fr_tacacs_decode_proto(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *data, size_t data_len, void *proto_ctx)
 {
 	fr_tacacs_ctx_t	*test_ctx = talloc_get_type_abort(proto_ctx, fr_tacacs_ctx_t);
+	fr_dict_attr_t const *dv;
 
-	return fr_tacacs_decode(ctx, out, data, data_len, NULL,
-				test_ctx->secret, (talloc_array_length(test_ctx->secret)-1));
+	dv = fr_dict_attr_by_name(NULL, fr_dict_root(dict_tacacs), "Test");
+	fr_assert(!dv || (dv->type == FR_TYPE_VENDOR));
+
+	return fr_tacacs_decode(ctx, out, dv, data, data_len, NULL,
+				test_ctx->secret, (talloc_array_length(test_ctx->secret)-1), false);
 }
 
 static int _encode_test_ctx(fr_tacacs_ctx_t *proto_ctx)

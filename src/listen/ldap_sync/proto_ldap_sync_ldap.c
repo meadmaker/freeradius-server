@@ -65,10 +65,12 @@ static CONF_PARSER const proto_ldap_sync_ldap_config[] = {
 };
 
 static fr_dict_t const *dict_ldap_sync;
+static fr_dict_t const *dict_freeradius;
 
 extern fr_dict_autoload_t proto_ldap_sync_ldap_dict[];
 fr_dict_autoload_t proto_ldap_sync_ldap_dict[] = {
 	{ .out = &dict_ldap_sync, .proto = "ldap" },
+	{ .out = &dict_freeradius, .proto = "freeradius" },
 	{ NULL }
 };
 
@@ -79,6 +81,7 @@ static fr_dict_attr_t const *attr_ldap_sync_entry_uuid;
 static fr_dict_attr_t const *attr_ldap_sync_orig_dn;
 static fr_dict_attr_t const *attr_ldap_sync_root_dn;
 static fr_dict_attr_t const *attr_packet_type;
+static fr_dict_attr_t const *attr_ldap_sync_base_dn;
 
 extern fr_dict_attr_autoload_t proto_ldap_sync_ldap_dict_attr[];
 fr_dict_attr_autoload_t proto_ldap_sync_ldap_dict_attr[] = {
@@ -89,6 +92,7 @@ fr_dict_attr_autoload_t proto_ldap_sync_ldap_dict_attr[] = {
 	{ .out = &attr_ldap_sync_orig_dn, .name = "LDAP-Sync.Original-DN", .type = FR_TYPE_STRING, .dict = &dict_ldap_sync },
 	{ .out = &attr_ldap_sync_root_dn, .name = "LDAP-Sync.Directory-Root-DN", .type = FR_TYPE_STRING, .dict = &dict_ldap_sync },
 	{ .out = &attr_packet_type, .name = "Packet-Type", .type = FR_TYPE_UINT32, .dict = &dict_ldap_sync },
+	{ .out = &attr_ldap_sync_base_dn, .name = "LDAP-Sync-Base-DN", .type = FR_TYPE_STRING, .dict = &dict_freeradius },
 	{ NULL }
 };
 
@@ -166,6 +170,8 @@ static int sync_state_free(sync_state_t *sync)
  *
  * @param[in] ctx	to allocate the sync state in.
  * @param[in] conn	which the sync will run on.
+ * @param[in] inst	module instance for the sync.
+ * @param[in] sync_no	number of the sync in the array of configs.
  * @param[in] config	for the sync.
  * @return new sync state.
  */
@@ -173,7 +179,6 @@ sync_state_t *sync_state_alloc(TALLOC_CTX *ctx, fr_ldap_connection_t *conn, prot
 			       size_t sync_no, sync_config_t const *config)
 {
 	sync_state_t		*sync;
-	fr_dict_attr_t const	*da;
 	fr_pair_t		*vp;
 
 	MEM(sync = talloc_zero(ctx, sync_state_t));
@@ -189,10 +194,7 @@ sync_state_t *sync_state_alloc(TALLOC_CTX *ctx, fr_ldap_connection_t *conn, prot
 	 *	Create arguments to pass to triggers
 	 */
 	fr_pair_list_init(&sync->trigger_args);
-	da = fr_dict_attr_child_by_num(fr_dict_root(fr_dict_internal()), FR_LDAP_SYNC_BASE_DN);
-	fr_assert_msg(da, "Incomplete internal dictionary: Missing definition for \"LDAP-Sync-Base-DN\"");
-
-	fr_pair_list_append_by_da_len(sync, vp, &sync->trigger_args, da, config->base_dn,
+	fr_pair_list_append_by_da_len(sync, vp, &sync->trigger_args, attr_ldap_sync_base_dn, config->base_dn,
 				      talloc_array_length(config->base_dn) - 1, false);
 
 	/*
@@ -478,7 +480,7 @@ int ldap_sync_entry_send(sync_state_t *sync, uint8_t const uuid[SYNC_UUID_LENGTH
 			for (i = 0; i < count; i++) {
 				if (values[i]->bv_len == 0) continue;
 
-				if (pair_append_by_tmpl_parent(sync_packet_ctx, &vp, pairs, map->lhs) < 0) break;
+				if (pair_append_by_tmpl_parent(sync_packet_ctx, &vp, pairs, map->lhs, true) < 0) break;
 				if (fr_value_box_from_str(vp, &vp->data, vp->da->type, NULL, values[i]->bv_val,
 							  values[i]->bv_len, NULL, true) < 0) {
 					fr_pair_remove(pairs, vp);

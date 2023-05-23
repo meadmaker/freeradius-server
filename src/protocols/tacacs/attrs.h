@@ -25,6 +25,8 @@
  */
 RCSIDH(tacacs_attrs_h, "$Id$")
 
+#include <freeradius-devel/util/dict.h>
+
 extern HIDDEN fr_dict_t const *dict_tacacs;
 
 extern HIDDEN fr_dict_attr_t const *attr_tacacs_accounting_flags;
@@ -51,6 +53,13 @@ extern HIDDEN fr_dict_attr_t const *attr_tacacs_sequence_number;
 extern HIDDEN fr_dict_attr_t const *attr_tacacs_server_message;
 extern HIDDEN fr_dict_attr_t const *attr_tacacs_session_id;
 extern HIDDEN fr_dict_attr_t const *attr_tacacs_user_message;
-extern HIDDEN fr_dict_attr_t const *attr_tacacs_user_name;
 extern HIDDEN fr_dict_attr_t const *attr_tacacs_version_major;
 extern HIDDEN fr_dict_attr_t const *attr_tacacs_version_minor;
+
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_user_name;
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_user_password;
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_chap_password;
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_chap_challenge;
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_mschap_response;
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_mschap2_response;
+extern HIDDEN fr_dict_attr_t const *attr_tacacs_mschap_challenge;

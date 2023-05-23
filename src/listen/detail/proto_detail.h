@@ -62,6 +62,8 @@ typedef struct {
 	uint32_t			num_messages;			//!< for message ring buffer
 	uint32_t			priority;			//!< for packet processing, larger == higher
 
+	bool				exit_when_done;		//!< exit when done reading the current file.
+
 	fr_schedule_t			*sc;				//!< the scheduler, where we insert new readers
 
 	fr_listen_t			*listen;			//!< The listener structure which describes
@@ -94,7 +96,7 @@ struct proto_detail_work_s {
 
 	fr_rb_node_t			filename_node;		//!< for dedup
 
-	RADCLIENT			*client;		//!< so the rest of the server doesn't complain
+	fr_client_t			*client;		//!< so the rest of the server doesn't complain
 };
 
 typedef struct proto_detail_work_thread_s proto_detail_work_thread_t;

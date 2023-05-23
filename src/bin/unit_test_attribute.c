@@ -42,6 +42,7 @@ typedef struct request_s request_t;
 #endif
 #include <freeradius-devel/unlang/base.h>
 #include <freeradius-devel/unlang/xlat.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/util/atexit.h>
 #include <freeradius-devel/util/base64.h>
 #include <freeradius-devel/util/calc.h>
@@ -256,7 +257,7 @@ typedef struct {
 
 static xlat_action_t xlat_test(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 			       UNUSED xlat_ctx_t const *xctx, UNUSED request_t *request,
-			       UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+			       UNUSED fr_value_box_list_t *in)
 {
 	return XLAT_ACTION_DONE;
 }
@@ -2587,7 +2588,7 @@ static ssize_t command_tmpl_rule_attr_parent(UNUSED TALLOC_CTX *ctx, tmpl_rules_
 	fr_slen_t		slen;
 
 	slen = fr_dict_attr_by_oid_substr(&err,
-					  &rules->attr.parent,
+					  &rules->attr.namespace,
 					  rules->attr.dict_def ? fr_dict_root(rules->attr.dict_def) :
 					  			 fr_dict_root(fr_dict_internal()),
 					  value, NULL);
@@ -2595,37 +2596,17 @@ static ssize_t command_tmpl_rule_attr_parent(UNUSED TALLOC_CTX *ctx, tmpl_rules_
 	return slen;
 }
 
-static ssize_t command_tmpl_rule_disallow_internal(UNUSED TALLOC_CTX *ctx, tmpl_rules_t *rules, fr_sbuff_t *value)
-{
-	bool res;
-	ssize_t slen;
-
-	slen = fr_sbuff_out_bool(&res, value);
-	rules->attr.disallow_internal = res;
-	return slen;
-}
-
-static ssize_t command_tmpl_rule_disallow_qualifiers(UNUSED TALLOC_CTX *ctx, tmpl_rules_t *rules, fr_sbuff_t *value)
-{
-	bool res;
-	ssize_t slen;
-
-	slen = fr_sbuff_out_bool(&res, value);
-	rules->attr.disallow_qualifiers = res;
-	return slen;
-}
-
 static ssize_t command_tmpl_rule_list_def(UNUSED TALLOC_CTX *ctx, tmpl_rules_t *rules, fr_sbuff_t *value)
 {
 	ssize_t slen;
 
-	fr_sbuff_out_by_longest_prefix(&slen, &rules->attr.list_def, pair_list_table, value, PAIR_LIST_UNKNOWN);
+	slen = tmpl_attr_list_from_substr(&rules->attr.list_def, value);
 
-	if (rules->attr.list_def == PAIR_LIST_UNKNOWN) {
+	if (slen == 0) {
 		fr_strerror_printf("Invalid list specifier \"%pV\"",
 				   fr_box_strvalue_len(fr_sbuff_current(value), fr_sbuff_remaining(value)));
 	}
-	
+
 	return slen;
 }
 
@@ -2635,9 +2616,7 @@ static ssize_t command_tmpl_rule_request_def(TALLOC_CTX *ctx, tmpl_rules_t *rule
 
 	slen = tmpl_request_ref_list_afrom_substr(ctx, NULL,
 						  &rules->attr.request_def,
-						  value,
-						  NULL,
-						  NULL);
+						  value);
 	if (slen < 0) {
 		fr_strerror_printf("Invalid request specifier \"%pV\"",
 				   fr_box_strvalue_len(fr_sbuff_current(value), fr_sbuff_remaining(value)));
@@ -2659,8 +2638,6 @@ static size_t command_tmpl_rules(command_result_t *result, command_file_ctx_t *c
 		{ L("allow_unknown"),		(void *)command_tmpl_rule_allow_unknown		},
 		{ L("allow_unresolved"),	(void *)command_tmpl_rule_allow_unresolved	},
 		{ L("attr_parent"),		(void *)command_tmpl_rule_attr_parent		},
-		{ L("disallow_internal"),	(void *)command_tmpl_rule_disallow_internal	},
-		{ L("disallow_qualifiers"), 	(void *)command_tmpl_rule_disallow_qualifiers	},
 		{ L("list_def"),		(void *)command_tmpl_rule_list_def		},
 		{ L("request_def"),		(void *)command_tmpl_rule_request_def		}
 	};
@@ -2833,6 +2810,7 @@ static size_t command_xlat_normalise(command_result_t *result, command_file_ctx_
 					.attr = {
 						.dict_def = cc->tmpl_rules.attr.dict_def ?
 						cc->tmpl_rules.attr.dict_def : cc->config->dict,
+						.list_def = request_attr_request,
 						.allow_unresolved = cc->tmpl_rules.attr.allow_unresolved
 					},
 				});
@@ -2869,7 +2847,7 @@ static size_t command_xlat_expr(command_result_t *result, command_file_ctx_t *cc
 							.dict_def = cc->tmpl_rules.attr.dict_def ?
 							   cc->tmpl_rules.attr.dict_def : cc->config->dict,
 							.allow_unresolved = cc->tmpl_rules.attr.allow_unresolved,
-							.list_as_attr = true,
+							.list_def = request_attr_request,
 						}
 					   });
 	if (dec_len <= 0) {
@@ -2909,7 +2887,7 @@ static size_t command_xlat_purify(command_result_t *result, command_file_ctx_t *
 							.dict_def = cc->tmpl_rules.attr.dict_def ?
 							   cc->tmpl_rules.attr.dict_def : cc->config->dict,
 							.allow_unresolved = cc->tmpl_rules.attr.allow_unresolved,
-							.list_as_attr = true,
+							.list_def = request_attr_request,
 						   },
 					   });
 	if (dec_len <= 0) {
@@ -2926,14 +2904,14 @@ static size_t command_xlat_purify(command_result_t *result, command_file_ctx_t *
 
 	if (fr_debug_lvl > 2) {
 		DEBUG("Before purify --------------------------------------------------");
-		xlat_debug(head);
+		xlat_debug_head(head);
 	}
 
 	(void) xlat_purify(head, NULL);
 
 	if (fr_debug_lvl > 2) {
 		DEBUG("After purify --------------------------------------------------");
-		xlat_debug(head);
+		xlat_debug_head(head);
 	}
 
 	escaped_len = xlat_print(&FR_SBUFF_OUT(data, COMMAND_OUTPUT_MAX), head, &fr_value_escape_double);
@@ -2962,6 +2940,7 @@ static size_t command_xlat_argv(command_result_t *result, command_file_ctx_t *cc
 					  .attr = {
 						  .dict_def = cc->tmpl_rules.attr.dict_def ?
 						  cc->tmpl_rules.attr.dict_def : cc->config->dict,
+						  .list_def = request_attr_request,
 						  .allow_unresolved = cc->tmpl_rules.attr.allow_unresolved
 					  },
 				  });
@@ -3163,7 +3142,7 @@ static fr_table_ptr_sorted_t	commands[] = {
 
 	{ L("tmpl-rules "),	&(command_entry_t){
 					.func = command_tmpl_rules,
-					.usage = "tmpl-rule [allow_foreign=yes] [allow_unknown=yes|no] [allow_unresolved=yes|no] [attr_parent=<oid>] [disallow_internal=yes|no] [disallow_qualifiers=yes|no] [list_def=request|reply|control|session-state] [request_def=current|outer|parent]",
+					.usage = "tmpl-rule [allow_foreign=yes] [allow_unknown=yes|no] [allow_unresolved=yes|no] [attr_parent=<oid>] [list_def=request|reply|control|session-state] [request_def=current|outer|parent]",
 					.description = "Alter the tmpl parsing rules for subsequent tmpl parsing commands in the same command context"
 				}},
 	{ L("touch "),		&(command_entry_t){
@@ -3343,6 +3322,8 @@ static command_file_ctx_t *command_ctx_alloc(TALLOC_CTX *ctx,
 	fr_dict_global_ctx_set(cc->config->dict_gctx);
 
 	cc->fuzzer_dir = -1;
+
+	cc->tmpl_rules.attr.list_def = request_attr_request;
 
 	return cc;
 }
@@ -3870,7 +3851,7 @@ int main(int argc, char *argv[])
 
 	unlang_thread_instantiate(thread_ctx);
 
-	if (!xlat_register(NULL, "test", xlat_test, FR_TYPE_NULL, NULL)) {
+	if (!xlat_func_register(NULL, "test", xlat_test, FR_TYPE_NULL)) {
 		ERROR("Failed registering xlat");
 		EXIT_WITH_FAILURE;
 	}

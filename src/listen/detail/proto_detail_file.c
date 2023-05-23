@@ -94,12 +94,18 @@ static int mod_decode(void const *instance, request_t *request, uint8_t *const d
 	return inst->parent->work_io->decode(inst->parent->work_io_instance, request, data, data_len);
 }
 
-static ssize_t mod_write(fr_listen_t *li, void *packet_ctx, fr_time_t request_time,
-			 uint8_t *buffer, size_t buffer_len, size_t written)
+static ssize_t mod_write(UNUSED fr_listen_t *li, UNUSED void *packet_ctx, UNUSED fr_time_t request_time,
+			 UNUSED uint8_t *buffer, UNUSED size_t buffer_len, UNUSED size_t written)
 {
+#if 1
+	fr_assert(0);
+
+	return -1;
+#else
 	proto_detail_file_thread_t  *thread = talloc_get_type_abort(li->thread_instance, proto_detail_file_thread_t);
 
 	return thread->listen->app_io->write(thread->listen, packet_ctx, request_time, buffer, buffer_len, written);
+#endif
 }
 
 static void mod_vnode_extend(fr_listen_t *li, UNUSED uint32_t fflags)
@@ -148,6 +154,8 @@ static int mod_open(fr_listen_t *li)
 	thread->name = talloc_typed_asprintf(thread, "detail_file which will read files matching %s", inst->filename);
 	thread->vnode_fd = -1;
 	pthread_mutex_init(&thread->worker_mutex, NULL);
+
+	li->no_write_callback = true;
 
 	return 0;
 }
@@ -511,6 +519,14 @@ retry:
 
 delay:
 		/*
+		 *	If we're processing one file and exiting, then the input file must exist.
+		 */
+		if (inst->immediate && inst->parent->exit_when_done) {
+			ERROR("Input file does not exist");
+			fr_exit(EXIT_FAILURE);
+		}
+
+		/*
 		 *	Check every N seconds.
 		 */
 		DEBUG3("Waiting %d.000000s for new files in %s", inst->poll_interval, thread->name);
@@ -651,6 +667,11 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	 *	We need this for the lock.
 	 */
 	inst->mode = O_RDWR;
+
+	if (inst->parent->exit_when_done && !inst->immediate) {
+		cf_log_warn(conf, "Ignoring 'exit_when_done' due to 'immediate' flag not being set");
+		inst->parent->exit_when_done = false;
+	}
 
 	return 0;
 }

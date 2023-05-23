@@ -440,6 +440,7 @@ static bool pass2_fixup_cond_map(fr_cond_t *c, CONF_ITEM *ci, fr_dict_t const *d
 					 NULL,
 					 &(tmpl_rules_t){
 					 	.attr = {
+							.list_def = request_attr_request,
 					 		.allow_unknown = true
 					 	}
 					 });
@@ -495,7 +496,7 @@ static bool pass2_fixup_cond_map(fr_cond_t *c, CONF_ITEM *ci, fr_dict_t const *d
 	 */
 	if (!tmpl_is_attr(map->lhs) ||
 	    !tmpl_request_ref_is_current(tmpl_request(map->lhs)) ||
-	    (tmpl_list(map->lhs) != PAIR_LIST_REQUEST)) {
+	    (tmpl_list(map->lhs) != request_attr_request)) {
 		return true;
 	}
 
@@ -851,8 +852,7 @@ int unlang_fixup_update(map_t *map, void *ctx)
 	if (!ctx) {
 		switch (map->lhs->type) {
 		case TMPL_TYPE_ATTR:
-		case TMPL_TYPE_LIST:
-			tmpl_attr_rewrite_leaf_num(map->lhs, NUM_UNSPEC, NUM_ALL);
+			if (!tmpl_is_list(map->lhs)) tmpl_attr_rewrite_leaf_num(map->lhs, NUM_UNSPEC, NUM_ALL);
 			break;
 
 		default:
@@ -864,8 +864,7 @@ int unlang_fixup_update(map_t *map, void *ctx)
 		 */
 		switch (map->rhs->type) {
 		case TMPL_TYPE_ATTR:
-		case TMPL_TYPE_LIST:
-			tmpl_attr_rewrite_leaf_num(map->rhs, NUM_UNSPEC, NUM_ALL);
+			if (!tmpl_is_list(map->rhs)) tmpl_attr_rewrite_leaf_num(map->rhs, NUM_UNSPEC, NUM_ALL);
 			break;
 
 		default:
@@ -896,7 +895,7 @@ int unlang_fixup_update(map_t *map, void *ctx)
 	/*
 	 *	What exactly where you expecting to happen here?
 	 */
-	if (tmpl_is_attr(map->lhs) &&
+	if (tmpl_attr_tail_da_is_leaf(map->lhs) &&
 	    tmpl_is_list(map->rhs)) {
 		cf_log_err(map->ci, "Can't copy list into an attribute");
 		return -1;
@@ -915,75 +914,6 @@ int unlang_fixup_update(map_t *map, void *ctx)
 
 		if (fr_comparison_op[map->op] && (map->op != T_OP_CMP_FALSE)) {
 			cf_log_warn(cp, "Please use the 'filter' keyword for attribute filtering");
-		}
-	}
-
-	if (tmpl_is_list(map->lhs)) {
-		/*
-		 *	Can't copy an xlat expansion or literal into a list,
-		 *	we don't know what type of attribute we'd need
-		 *	to create.
-		 *
-		 *	The only exception is where were using a unary
-		 *	operator like !*.
-		 */
-		if (map->op != T_OP_CMP_FALSE) switch (map->rhs->type) {
-		case TMPL_TYPE_XLAT_UNRESOLVED:
-		case TMPL_TYPE_UNRESOLVED:
-			cf_log_err(map->ci, "Can't copy value into list (we don't know which attribute to create)");
-			return -1;
-
-		default:
-			break;
-		}
-
-		/*
-		 *	Only += and :=, and !*, and ^= operators are supported
-		 *	for lists.
-		 */
-		switch (map->op) {
-		case T_OP_CMP_FALSE:
-			break;
-
-		case T_OP_ADD_EQ:
-			if (!tmpl_is_list(map->rhs) &&
-			    !tmpl_is_exec(map->rhs)) {
-				cf_log_err(map->ci, "Invalid source for list assignment '%s += ...'", map->lhs->name);
-				return -1;
-			}
-			break;
-
-		case T_OP_SET:
-			if (tmpl_is_exec(map->rhs)) {
-				WARN("%s[%d]: Please change ':=' to '=' for list assignment",
-				     cf_filename(cp), cf_lineno(cp));
-			}
-
-			if (!tmpl_is_list(map->rhs)) {
-				cf_log_err(map->ci, "Invalid source for list assignment '%s := ...'", map->lhs->name);
-				return -1;
-			}
-			break;
-
-		case T_OP_EQ:
-			if (!tmpl_is_exec(map->rhs)) {
-				cf_log_err(map->ci, "Invalid source for list assignment '%s = ...'", map->lhs->name);
-				return -1;
-			}
-			break;
-
-		case T_OP_PREPEND:
-			if (!tmpl_is_list(map->rhs) &&
-			    !tmpl_is_exec(map->rhs)) {
-				cf_log_err(map->ci, "Invalid source for list assignment '%s ^= ...'", map->lhs->name);
-				return -1;
-			}
-			break;
-
-		default:
-			cf_log_err(map->ci, "Operator \"%s\" not allowed for list assignment",
-				   fr_table_str_by_value(fr_tokens_table, map->op, "<INVALID>"));
-			return -1;
 		}
 	}
 
@@ -1364,7 +1294,7 @@ static unlang_t *compile_update_to_edit(unlang_t *parent, unlang_compile_t *unla
 	if (name2) {
 		snprintf(list_buffer, sizeof(list_buffer), "&%s", name2);
 	} else {
-		snprintf(list_buffer, sizeof(list_buffer), "&%s", fr_table_str_by_value(pair_list_table, unlang_ctx->rules->attr.list_def, "???"));
+		snprintf(list_buffer, sizeof(list_buffer), "&%s", tmpl_list_name(unlang_ctx->rules->attr.list_def, "<INVALID>"));
 	}
 
 	/*
@@ -1404,6 +1334,7 @@ static unlang_t *compile_update_to_edit(unlang_t *parent, unlang_compile_t *unla
 		 */
 		{
 			char const *p, *q;
+			fr_dict_attr_t const *tmpl_list;
 
 			p = attr;
 
@@ -1429,7 +1360,7 @@ static unlang_t *compile_update_to_edit(unlang_t *parent, unlang_compile_t *unla
 			 *
 			 *	@todo - add support for &config?
 			 */
-			if (fr_table_value_by_substr(pair_list_table, p, q - p, PAIR_LIST_UNKNOWN) != PAIR_LIST_UNKNOWN) {
+			if (tmpl_attr_list_from_substr(&tmpl_list, &FR_SBUFF_IN(p, (q - p))) > 0) {
 				if (*q) {
 					p = q + 1;
 				} else {
@@ -1645,6 +1576,7 @@ static unlang_t *compile_update(unlang_t *parent, unlang_compile_t *unlang_ctx, 
 	 */
 	t_rules = *(unlang_ctx->rules);
 	t_rules.attr.allow_unknown = true;
+	t_rules.attr.allow_wildcard = true;
 	RULES_VERIFY(&t_rules);
 
 	g = group_allocate(parent, cs, &update_ext);
@@ -1827,7 +1759,6 @@ static unlang_t *compile_edit_section(unlang_t *parent, unlang_compile_t *unlang
 	 */
 	t_rules = *(unlang_ctx->rules);
 	t_rules.attr.allow_unknown = true;
-	t_rules.attr.list_as_attr = true;
 	RULES_VERIFY(&t_rules);
 
 	c = *prev;
@@ -1948,7 +1879,6 @@ static unlang_t *compile_edit_pair(unlang_t *parent, unlang_compile_t *unlang_ct
 	 */
 	t_rules = *(unlang_ctx->rules);
 	t_rules.attr.allow_unknown = true;
-	t_rules.attr.list_as_attr = true;
 	RULES_VERIFY(&t_rules);
 
 	/*
@@ -2075,7 +2005,7 @@ static unlang_t *compile_variable(unlang_t *parent, unlang_compile_t *unlang_ctx
 		t_rules->parent = unlang_ctx->rules;
 
 		t_rules->attr.dict_def = var->dict;
-		t_rules->attr.parent = NULL;
+		t_rules->attr.namespace = NULL;
 
 		unlang_ctx->rules = t_rules;
 	}
@@ -2318,7 +2248,7 @@ bool unlang_compile_actions(unlang_actions_t *actions, CONF_SECTION *action_cs, 
 
 			subci = cf_reference_item(cs, cf_root(cf_section_to_item(action_cs)), value);
 			if (!subci) {
-				cf_log_err(csi, "Unknown reference '%s'", value ? value : "???");
+				cf_log_err(csi, "Unknown reference '%s'", value ? value : "<INVALID>");
 				return false;
 			}
 
@@ -2356,13 +2286,13 @@ bool unlang_compile_actions(unlang_actions_t *actions, CONF_SECTION *action_cs, 
 
 		if (module_retry) {
 			cf_log_err(csi, "Cannot use a '%s = retry' action for a module which has its own retries",
-				   fr_table_str_by_value(mod_rcode_table, i, "???"));
+				   fr_table_str_by_value(mod_rcode_table, i, "<INVALID>"));
 			return false;
 		}
 
 		if (disallow_retry_action) {
 			cf_log_err(csi, "max_rtx_count and max_rtx_duration cannot both be zero when using '%s = retry'",
-				   fr_table_str_by_value(mod_rcode_table, i, "???"));
+				   fr_table_str_by_value(mod_rcode_table, i, "<INVALID>"));
 			return false;
 		}
 
@@ -2370,7 +2300,7 @@ bool unlang_compile_actions(unlang_actions_t *actions, CONF_SECTION *action_cs, 
 		    !actions->retry.mrc &&
 		    !fr_time_delta_ispos(actions->retry.mrd)) {
 			cf_log_err(csi, "Cannot use a '%s = retry' action without a 'retry { ... }' section.",
-				   fr_table_str_by_value(mod_rcode_table, i, "???"));
+				   fr_table_str_by_value(mod_rcode_table, i, "<INVALID>"));
 			return false;
 		}
 	}
@@ -2767,6 +2697,8 @@ static unlang_t *compile_section(unlang_t *parent, unlang_compile_t *unlang_ctx,
 	unlang_t	*c;
 	char const	*name1, *name2;
 
+	fr_assert(unlang_ctx->rules != NULL);
+	fr_assert(unlang_ctx->rules->attr.list_def);
 	/*
 	 *	We always create a group, even if the section is empty.
 	 */
@@ -3474,6 +3406,7 @@ static unlang_t *compile_foreach(unlang_t *parent, unlang_compile_t *unlang_ctx,
 	 */
 	t_rules = *(unlang_ctx->rules);
 	t_rules.attr.allow_unknown = true;
+	t_rules.attr.allow_wildcard = true;
 	RULES_VERIFY(&t_rules);
 
 	name2 = cf_section_name2(cs);
@@ -3521,7 +3454,7 @@ static unlang_t *compile_foreach(unlang_t *parent, unlang_compile_t *unlang_ctx,
 	 */
 	fr_assert(vpt);
 
-	if (!tmpl_is_attr(vpt) && !tmpl_is_list(vpt)) {
+	if (!tmpl_is_attr(vpt)) {
 		cf_log_err(cs, "MUST use attribute or list reference (not %s) in 'foreach'",
 			   tmpl_type_to_str(vpt->type));
 		talloc_free(vpt);
@@ -3721,13 +3654,14 @@ static unlang_t *compile_if_subsection(unlang_t *parent, unlang_compile_t *unlan
 	/*
 	 *	Migration support.
 	 */
-	if (main_config->parse_new_conditions) {
+	if (main_config->use_new_conditions) {
 		char const *name2 = cf_section_name2(cs);
 		ssize_t slen;
 
 		tmpl_rules_t t_rules = (tmpl_rules_t) {
 			.attr = {
 				.dict_def = xr_rules.tr_rules->dict_def,
+				.list_def = request_attr_request,
 				.allow_unresolved = true,
 				.allow_unknown = true
 			}
@@ -3766,11 +3700,9 @@ static unlang_t *compile_if_subsection(unlang_t *parent, unlang_compile_t *unlan
 		 *	If the condition is always false, we don't compile the
 		 *	children.
 		 */
-		if (main_config->use_new_conditions) {
-			if (is_truthy && !value) goto skip;
+		if (is_truthy && !value) goto skip;
 
-			goto do_compile;
-		}
+		goto do_compile;
 	}
 
 	cond = cf_data_value(cf_data_find(cs, fr_cond_t, NULL));
@@ -4165,7 +4097,7 @@ static unlang_t *compile_subrequest(unlang_t *parent, unlang_compile_t *unlang_c
 
 	fr_dict_t const			*dict;
 	fr_dict_attr_t const		*da = NULL;
-	fr_dict_enum_value_t const		*type_enum = NULL;
+	fr_dict_enum_value_t const	*type_enum = NULL;
 
 	char const			*packet_name = NULL;
 	char				*p, *namespace = NULL;
@@ -4723,10 +4655,9 @@ check_for_loop:
 	return subcs;
 }
 
-
 static unlang_t *compile_module(unlang_t *parent, unlang_compile_t *unlang_ctx,
 				CONF_ITEM *ci, module_instance_t *inst, module_method_t method,
-				char const *realname)
+				call_method_env_t const *method_env, char const *realname)
 {
 	module_rlm_t const *mrlm = module_rlm_from_module(inst->module);
 	unlang_t *c;
@@ -4750,27 +4681,14 @@ static unlang_t *compile_module(unlang_t *parent, unlang_compile_t *unlang_ctx,
 	 *	component.
 	 */
 	if (!method) {
-		if (unlang_ctx->section_name1 && unlang_ctx->section_name2) {
-			cf_log_err(ci, "The \"%s\" module does not have a '%s %s' method.",
-				   inst->module->name,
-				   unlang_ctx->section_name1, unlang_ctx->section_name2);
-
-		} else if (!unlang_ctx->section_name1) {
-			cf_log_err(ci, "The \"%s\" module cannot be called as '%s'.",
-				   inst->module->name, realname);
-
-		} else {
-			cf_log_err(ci, "The \"%s\" module does not have a '%s' method.",
-				   inst->module->name,
-				   unlang_ctx->section_name1);
-		}
-
+		cf_log_err(ci, "Failed compiling %s - %s", inst->module->name, fr_strerror());
 		return NULL;
 	}
 
 	MEM(single = talloc_zero(parent, unlang_module_t));
 	single->instance = inst;
 	single->method = method;
+	single->method_env = method_env;
 
 	c = unlang_module_to_generic(single);
 	c->parent = parent;
@@ -4792,15 +4710,40 @@ static unlang_t *compile_module(unlang_t *parent, unlang_compile_t *unlang_ctx,
 	compile_action_defaults(c, unlang_ctx);
 
 	/*
+	 *	Parse the method environment for this module / method
+	 */
+	if (method_env) {
+		size_t	count, vallen = 0;
+
+		/*
+		 *	Firstly assess how many parsed env there will be and create a talloc pool to hold them.
+		 *	The pool size is a rough estimate based on each tmpl also allocating at least two children,
+		 *	for which we allow twice the length of the value to be parsed.
+		 */
+		count = call_env_count(&vallen, inst->dl_inst->conf, method_env->env);
+		MEM(single->call_env_ctx = _talloc_pooled_object(single, 0, "call_env_ctx", count * 4,
+						(sizeof(call_env_parsed_t) + sizeof(tmpl_t)) * count + vallen * 2));
+
+		call_env_parsed_init(&single->call_env_parsed);
+		if (call_env_parse(single->call_env_ctx, &single->call_env_parsed, single->self.name,
+				   unlang_ctx->rules ? unlang_ctx->rules->attr.dict_def : fr_dict_internal(),
+				   inst->dl_inst->conf, method_env->env) < 0) {
+		error:
+			talloc_free(c);
+			return NULL;
+		}
+		fr_assert_msg(method_env->inst_size, "Method environment for module %s, method %s %s declared, "
+			      "but no inst_size set",
+			      inst->module->name, unlang_ctx->section_name1, unlang_ctx->section_name2);
+	};
+
+	/*
 	 *	If a module reference is a section, then the section
 	 *	should contain action over-rides.  We add those here.
 	 */
 	if (cf_item_is_section(ci) &&
 	    !unlang_compile_actions(&c->actions, cf_item_to_section(ci),
-				    (inst->module->type & MODULE_TYPE_RETRY) != 0)) {
-		    talloc_free(c);
-		    return NULL;
-	}
+				    (inst->module->type & MODULE_TYPE_RETRY) != 0)) goto error;
 
 	return c;
 }
@@ -4852,6 +4795,7 @@ static unlang_t *compile_item(unlang_t *parent, unlang_compile_t *unlang_ctx, CO
 	bool			policy;
 	unlang_op_compile_t	compile;
 	unlang_t		*c;
+	call_method_env_t const	*method_env = NULL;
 
 	if (cf_item_is_section(ci)) {
 		cs = cf_item_to_section(ci);
@@ -5021,11 +4965,11 @@ check_for_module:
 	 *	name2, etc.
 	 */
 	UPDATE_CTX2;
-	inst = module_rlm_by_name_and_method(&method, &unlang_ctx2.component,
+	inst = module_rlm_by_name_and_method(&method, &method_env, &unlang_ctx2.component,
 					     &unlang_ctx2.section_name1, &unlang_ctx2.section_name2,
 					     realname);
 	if (inst) {
-		c = compile_module(parent, &unlang_ctx2, ci, inst, method, realname);
+		c = compile_module(parent, &unlang_ctx2, ci, inst, method, method_env, realname);
 		goto allocate_number;
 	}
 
@@ -5043,9 +4987,7 @@ check_for_module:
 	 *	named method.
 	 */
 	if (!unlang_ctx2.section_name1) {
-		cf_log_err(ci, "The '%s' module does not have a '%s %s' method.",
-			   name, unlang_ctx->section_name1,
-			   unlang_ctx->section_name2 ? unlang_ctx->section_name2 : "");
+		cf_log_err(ci, "Failed compiling %s - %s", name, fr_strerror());
 		return NULL;
 	}
 

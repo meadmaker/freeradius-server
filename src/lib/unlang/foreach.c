@@ -25,6 +25,7 @@
 RCSID("$Id$")
 
 #include <freeradius-devel/server/request_data.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include "foreach_priv.h"
 #include "return_priv.h"
@@ -60,7 +61,7 @@ typedef struct {
 
 static xlat_action_t unlang_foreach_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					 xlat_ctx_t const *xctx,
-					 request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in);
+					 request_t *request, UNUSED fr_value_box_list_t *in);
 
 #define FOREACH_REQUEST_DATA (void *)unlang_foreach_xlat
 
@@ -83,6 +84,21 @@ static unlang_action_t unlang_foreach_next(rlm_rcode_t *p_result, request_t *req
 	if (is_stack_unwinding_to_break(request->stack)) return UNLANG_ACTION_CALCULATE_RESULT;
 
 	vp = fr_dcursor_next(&state->cursor);
+
+	/*
+	 *	Skip any non-leaf attributes - adds sanity to foreach &request.[*]
+	 */
+	while (vp) {
+		switch (vp->da->type) {
+		case FR_TYPE_LEAF:
+			break;
+		default:
+			vp = fr_dcursor_next(&state->cursor);
+			continue;
+		}
+		break;
+	}
+
 	if (!vp) {
 		*p_result = frame->result;
 #ifndef NDEBUG
@@ -118,6 +134,7 @@ static unlang_action_t unlang_foreach(rlm_rcode_t *p_result, request_t *request,
 
 	int				i, depth = 0;
 	fr_pair_list_t			vps;
+	fr_pair_t			*vp;
 
 	fr_pair_list_init(&vps);
 
@@ -157,10 +174,36 @@ static unlang_action_t unlang_foreach(rlm_rcode_t *p_result, request_t *request,
 
 	fr_assert(!fr_pair_list_empty(&vps));
 
-	state->request = request;
-	state->depth = depth;
 	fr_pair_list_append(&state->vps, &vps);
 	fr_pair_dcursor_init(&state->cursor, &state->vps);
+
+	/*
+	 *	Skip any non-leaf attributes at the start of the cursor
+	 *	Adds sanity to foreach &request.[*]
+	 */
+	vp = fr_dcursor_current(&state->cursor);
+	while (vp) {
+		switch (vp->da->type) {
+		case FR_TYPE_LEAF:
+			break;
+		default:
+			vp = fr_dcursor_next(&state->cursor);
+			continue;
+		}
+		break;
+	}
+
+	/*
+	 *	If no non-leaf attributes found clean up
+	 */
+	if (!vp) {
+		fr_dcursor_free_list(&state->cursor);
+		*p_result = RLM_MODULE_NOOP;
+		return UNLANG_ACTION_CALCULATE_RESULT;
+	}
+
+	state->request = request;
+	state->depth = depth;
 #ifndef NDEBUG
 	state->indent = request->log.unlang_indent;
 #endif
@@ -206,7 +249,7 @@ static unlang_action_t unlang_break(rlm_rcode_t *p_result, request_t *request, u
  */
 static xlat_action_t unlang_foreach_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					 xlat_ctx_t const *xctx,
-					 request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+					 request_t *request, UNUSED fr_value_box_list_t *in)
 {
 	fr_pair_t			*vp;
 	int const			*inst = xctx->inst;
@@ -232,11 +275,11 @@ void unlang_foreach_init(void)
 	for (i = 0; i < NUM_ELEMENTS(xlat_foreach_names); i++) {
 		xlat_t *x;
 
-		x = xlat_register(NULL, xlat_foreach_names[i],
-				  unlang_foreach_xlat, FR_TYPE_VOID, 0);
+		x = xlat_func_register(NULL, xlat_foreach_names[i],
+				  unlang_foreach_xlat, FR_TYPE_VOID);
 		fr_assert(x);
+		xlat_func_flags_set(x, XLAT_FUNC_FLAG_INTERNAL);
 		x->uctx = &xlat_foreach_inst[i];
-		xlat_internal(x);
 	}
 
 	unlang_register(UNLANG_TYPE_FOREACH,
@@ -258,6 +301,6 @@ void unlang_foreach_free(void)
 	size_t	i;
 
 	for (i = 0; i < NUM_ELEMENTS(xlat_foreach_names); i++) {
-		xlat_unregister(xlat_foreach_names[i]);
+		xlat_func_unregister(xlat_foreach_names[i]);
 	}
 }

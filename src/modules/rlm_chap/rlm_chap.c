@@ -29,6 +29,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/password.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/radius/radius.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 typedef struct {
 	fr_dict_enum_value_t		*auth_type;
@@ -78,7 +79,7 @@ static xlat_arg_parser_t const xlat_func_chap_password_args[] = {
  */
 static xlat_action_t xlat_func_chap_password(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 	     UNUSED xlat_ctx_t const *xctx,
-					     request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					     request_t *request, fr_value_box_list_t *in)
 {
 	uint8_t		chap_password[1 + RADIUS_CHAP_CHALLENGE_LENGTH];
 	fr_value_box_t	*vb;
@@ -292,16 +293,15 @@ static int mod_load(void)
 {
 	xlat_t	*xlat;
 
-	xlat = xlat_register(NULL, "chap_password", xlat_func_chap_password, FR_TYPE_OCTETS, NULL);
-	if (!xlat) return -1;
-	xlat_func_args(xlat, xlat_func_chap_password_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "chap_password", xlat_func_chap_password, FR_TYPE_OCTETS)) == NULL)) return -1;
+	xlat_func_args_set(xlat, xlat_func_chap_password_args);
 
 	return 0;
 }
 
 static void mod_unload(void)
 {
-	xlat_unregister("chap_password");
+	xlat_func_unregister("chap_password");
 }
 
 /*

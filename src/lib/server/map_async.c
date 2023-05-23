@@ -206,7 +206,7 @@ static inline fr_pair_list_t *map_check_src_or_dst(request_t *request, map_t con
 {
 	request_t		*context = request;
 	fr_pair_list_t		*list;
-	tmpl_pair_list_t	list_ref;
+	fr_dict_attr_t const	*list_ref;
 
 	if (tmpl_request_ptr(&context, tmpl_request(src_dst)) < 0) {
 		RPEDEBUG("Mapping \"%.*s\" -> \"%.*s\" cannot be performed",
@@ -219,7 +219,7 @@ static inline fr_pair_list_t *map_check_src_or_dst(request_t *request, map_t con
 	if (!list) {
 		REDEBUG("Mapping \"%.*s\" -> \"%.*s\" cannot be performed due to to invalid list qualifier \"%s\"",
 			(int)map->rhs->len, map->rhs->name, (int)map->lhs->len, map->lhs->name,
-			fr_table_str_by_value(pair_list_table, list_ref, "<INVALID>"));
+			tmpl_list_name(list_ref, "<INVALID>"));
 		return NULL;
 	}
 
@@ -233,7 +233,7 @@ static inline fr_pair_list_t *map_check_src_or_dst(request_t *request, map_t con
  * @param[in,out] ctx		to allocate modification maps in.
  * @param[out] out		Where to write the #fr_pair_t (s), which may be NULL if not found
  * @param[in] request		The current request.
- * @param[in] original		the map. The LHS (dst) has to be #TMPL_TYPE_ATTR or #TMPL_TYPE_LIST.
+ * @param[in] original		the map. The LHS (dst) has to be #TMPL_TYPE_ATTR.
  * @param[in] lhs_result	of previous stack based rhs evaluation.
  *				Must be provided for rhs types:
  *				- TMPL_TYPE_XLAT
@@ -250,14 +250,14 @@ static inline fr_pair_list_t *map_check_src_or_dst(request_t *request, map_t con
  */
 int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 		    request_t *request, map_t const *original,
-		    FR_DLIST_HEAD(fr_value_box_list) *lhs_result, FR_DLIST_HEAD(fr_value_box_list) *rhs_result)
+		    fr_value_box_list_t *lhs_result, fr_value_box_list_t *rhs_result)
 {
 	vp_list_mod_t	*n = NULL;
 	map_t		map_tmp;
 	map_t const	*mutated = original;
 
 	fr_dcursor_t	values;
-	FR_DLIST_HEAD(fr_value_box_list)	head;
+	fr_value_box_list_t	head;
 	TALLOC_CTX	*tmp_ctx = NULL;
 
 	MAP_VERIFY(original);
@@ -265,9 +265,8 @@ int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 	if (!fr_cond_assert(original->lhs != NULL)) return -1;
 	if (!fr_cond_assert(original->rhs != NULL)) return -1;
 
-	fr_assert(tmpl_is_list(original->lhs) ||
-		   tmpl_is_attr(original->lhs) ||
-		   tmpl_is_xlat(original->lhs));
+	fr_assert(tmpl_is_attr(original->lhs) ||
+		  tmpl_is_xlat(original->lhs));
 
 	*out = NULL;
 	fr_value_box_list_init(&head);
@@ -279,7 +278,6 @@ int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 	/*
 	 *	Already in the correct form.
 	 */
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_ATTR:
 		break;
 
@@ -323,6 +321,7 @@ int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 					   &(tmpl_rules_t){
 					   	.attr = {
 					   		.dict_def = request->dict,
+							.list_def = request_attr_request,
 				   			.prefix = TMPL_ATTR_REF_PREFIX_NO
 				   		}
 					   });
@@ -332,7 +331,7 @@ int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 			fr_value_box_list_talloc_free(lhs_result);
 			goto error;
 		}
-		fr_assert(tmpl_is_attr(mutated->lhs) || tmpl_is_list(mutated->lhs));
+		fr_assert(tmpl_is_attr(mutated->lhs));
 	}
 		break;
 
@@ -361,7 +360,8 @@ int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 	/*
 	 *	List to list copy.
 	 */
-	if (tmpl_is_list(mutated->lhs) && tmpl_is_list(mutated->rhs)) {
+	if (tmpl_is_attr(mutated->lhs) && tmpl_is_attr(mutated->rhs) &&
+	    tmpl_attr_tail_da_is_structural(mutated->lhs) && tmpl_attr_tail_da_is_structural(mutated->rhs)) {
 		fr_pair_list_t	*list = NULL;
 		fr_pair_t	*vp = NULL;
 
@@ -539,8 +539,7 @@ int map_to_list_mod(TALLOC_CTX *ctx, vp_list_mod_t **out,
 		int			err;
 
 		fr_assert(fr_value_box_list_empty(rhs_result));
-		fr_assert((tmpl_is_attr(mutated->lhs) && tmpl_attr_tail_da(mutated->lhs)) ||
-			   (tmpl_is_list(mutated->lhs) && !tmpl_attr_tail_da(mutated->lhs)));
+		fr_assert(tmpl_is_attr(mutated->lhs) && tmpl_attr_tail_da(mutated->lhs));
 
 		/*
 		 *	Check source list
@@ -891,20 +890,6 @@ static inline void map_list_mod_debug(request_t *request,
 		rhs = fr_asprintf(request, "%s%pV%s", quote, vb, quote);
 		break;
 
-	/*
-	 *	For the lists, we can't use the original name, and have to
-	 *	rebuild it using tmpl_print, for each attribute we're
-	 *	copying.
-	 */
-	case TMPL_TYPE_LIST:
-	{
-		char buffer[256];
-
-		tmpl_print(&FR_SBUFF_OUT(buffer, sizeof(buffer)), map->rhs, TMPL_ATTR_REF_PREFIX_YES, NULL);
-		rhs = fr_asprintf(request, "%s -> %s%pV%s", buffer, quote, vb, quote);
-	}
-		break;
-
 	case TMPL_TYPE_ATTR:
 		rhs = fr_asprintf(request, "%s -> %s%pV%s", map->rhs->name, quote, vb, quote);
 		break;
@@ -916,7 +901,6 @@ static inline void map_list_mod_debug(request_t *request,
 
 	switch (map->lhs->type) {
 	case TMPL_TYPE_ATTR:
-	case TMPL_TYPE_LIST:
 		RDEBUG2("%s %s %s", map->lhs->name, fr_table_str_by_value(fr_tokens_table, mod->op, "<INVALID>"), rhs);
 		break;
 
@@ -964,7 +948,7 @@ int map_list_mod_apply(request_t *request, vp_list_mod_t const *vlm)
 		fr_assert(mod->lhs != NULL);
 		fr_assert(mod->rhs != NULL);
 
-		fr_assert(tmpl_is_attr(mod->lhs) || tmpl_is_list(mod->lhs));
+		fr_assert(tmpl_is_attr(mod->lhs));
 		fr_assert(((mod->op == T_OP_CMP_FALSE) && tmpl_is_null(mod->rhs)) ||
 			   tmpl_is_data(mod->rhs));
 

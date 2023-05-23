@@ -14,6 +14,7 @@
 #include <freeradius-devel/server/global_lib.h>
 #include <freeradius-devel/server/map.h>
 #include <freeradius-devel/server/trunk.h>
+#include <freeradius-devel/unlang/function.h>
 #include <freeradius-devel/util/dlist.h>
 
 #define LDAP_DEPRECATED 0	/* Quiet warnings about LDAP_DEPRECATED not being defined */
@@ -174,7 +175,8 @@ typedef enum {
  */
 typedef enum {
 	LDAP_REQUEST_SEARCH = 1,			//!< A lookup in an LDAP directory
-	LDAP_REQUEST_MODIFY				//!< A modification to an LDAP entity
+	LDAP_REQUEST_MODIFY,				//!< A modification to an LDAP entity
+	LDAP_REQUEST_EXTENDED				//!< An extended LDAP operation
 } fr_ldap_request_type_t;
 
 /** LDAP query result codes
@@ -344,6 +346,7 @@ typedef struct {
 	int			fd;			//!< File descriptor for this connection.
 
 	fr_rb_tree_t		*queries;		//!< Outstanding queries on this connection
+	fr_dlist_head_t		refs;			//!< Replied to queries still referencing this connection.
 
 	void			*uctx;			//!< User data associated with the handle.
 } fr_ldap_connection_t;
@@ -376,8 +379,9 @@ typedef struct {
 	fr_rb_tree_t		*trunks;	//!< Tree of LDAP trunks used by this thread
 	fr_ldap_config_t	*config;	//!< Module instance config
 	fr_trunk_conf_t		*trunk_conf;	//!< Module trunk config
+	fr_trunk_conf_t		*bind_trunk_conf;	//!< Trunk config for bind auth trunk
 	fr_event_list_t		*el;		//!< Thread event list for callbacks / timeouts
-	fr_connection_t		*conn;		//!< LDAP connection used for bind auths
+	fr_ldap_thread_trunk_t	*bind_trunk;	//!< LDAP trunk used for bind auths
 	fr_rb_tree_t		*binds;		//!< Tree of outstanding bind auths
 } fr_ldap_thread_t;
 
@@ -414,6 +418,7 @@ typedef void (*fr_ldap_result_parser_t)(LDAP *handle, fr_ldap_query_t *query, LD
  */
 struct fr_ldap_query_s {
 	fr_rb_node_t		node;		//!< Entry in the tree of outstanding queries.
+	fr_dlist_t		entry;		//!< Entry in the list of connection references.
 
 	LDAPURLDesc		*ldap_url;	//!< parsed URL for current query if the source
 						///< of the query was a URL.
@@ -426,6 +431,10 @@ struct fr_ldap_query_s {
 			int		scope;		//!< Search scope.
 			char const	*filter;	//!< Filter for search.
 		} search;
+		struct {
+			char const	*reqoid;	//!< OID of extended operation to perform.
+			struct berval	*reqdata;	//!< Data required for the request.
+		} extended;
 		LDAPMod			**mods;		//!< Changes to be applied if this query is a modification.
 	};
 
@@ -476,29 +485,40 @@ typedef struct fr_ldap_referral_s {
  *
  */
 typedef struct {
-	fr_ldap_connection_t	*c;			//!< to bind.
+	fr_ldap_connection_t	*c;			//!< to bind.  Only used when binding as admin user.
 	char const		*bind_dn;		//!< of the user, may be NULL to bind anonymously.
 	char const		*password;		//!< of the user, may be NULL if no password is specified.
 	LDAPControl		**serverctrls;		//!< Controls to pass to the server.
 	LDAPControl		**clientctrls;		//!< Controls to pass to the client (library).
 
-	int			msgid;
+	int			msgid;			//!< Of the bind operation.  Only used when binding as admin.
 } fr_ldap_bind_ctx_t;
 
-
-/** Holds arguments for async bind auth requests
+/** Holds arguments for the async SASL bind operation
  *
- * Used when LDAP binds are being used to authenticate users, rather than admin binds.
- * Allows tracking of multiple bind requests on a single connection.
  */
 typedef struct {
-	fr_rb_node_t		node;		//!< Entry in the tree of outstanding bind requests.
-	fr_ldap_thread_t	*thread;	//!< This bind is being run by.
-	int			msgid;		//!< libldap msgid for this bind.
-	request_t		*request;	//!< this bind relates to.
-	fr_ldap_bind_ctx_t	*bind_ctx;	//!< Data relating to the user being bound.
-	fr_ldap_result_code_t	ret;		//!< Return code of bind operation.
-} fr_ldap_bind_auth_ctx_t;
+	fr_ldap_connection_t	*c;			//!< to bind.  Only used when binding as admin user.
+	char const		*mechs;			//!< SASL mechanisms to run
+	char const		*dn;			//!< to bind as.
+	char const		*identity;		//!< of the user.
+	char const		*password;		//!< of the user, may be NULL if no password is specified.
+	char const		*proxy;			//!< Proxy identity, may be NULL in which case identity is used.
+	char const		*realm;			//!< SASL realm (may be NULL).
+	LDAPControl		**serverctrls;		//!< Controls to pass to the server.
+	LDAPControl		**clientctrls;		//!< Controls to pass to the client (library).
+
+	int			msgid;			//!< Last msgid.  Only used when binding as admin user.
+	LDAPMessage		*result;		//!< Previous result.
+	char const		*rmech;			//!< Mech we're continuing with.
+} fr_ldap_sasl_ctx_t;
+
+typedef enum {
+	LDAP_BIND_SIMPLE		= 0,
+#ifdef WITH_SASL
+	LDAP_BIND_SASL
+#endif
+} fr_ldap_bind_type_t;
 
 typedef struct ldap_filter_s ldap_filter_t;
 
@@ -580,6 +600,25 @@ typedef enum {
 							//!< exit, and retry the operation with a NULL cookie.
 } fr_ldap_rcode_t;
 
+/** Holds arguments for async bind auth requests
+ *
+ * Used when LDAP binds are being used to authenticate users, rather than admin binds.
+ * Allows tracking of multiple bind requests on a single connection.
+ */
+typedef struct {
+	fr_rb_node_t		node;		//!< Entry in the tree of outstanding bind requests.
+	fr_ldap_thread_t	*thread;	//!< This bind is being run by.
+	fr_trunk_request_t	*treq;		//!< Trunk request this bind is associated with.
+	int			msgid;		//!< libldap msgid for this bind.
+	request_t		*request;	//!< this bind relates to.
+	fr_ldap_bind_type_t	type;		//!< type of bind.
+	union {
+		fr_ldap_bind_ctx_t	*bind_ctx;	//!< User data for simple binds.
+		fr_ldap_sasl_ctx_t	*sasl_ctx;	//!< User data for SASL binds.
+	};
+	fr_ldap_rcode_t		ret;		//!< Return code of bind operation.
+} fr_ldap_bind_auth_ctx_t;
+
 /*
  *	Tables for resolving strings to LDAP constants
  */
@@ -624,6 +663,24 @@ static inline void fr_ldap_berval_to_value_str_shallow(fr_value_box_t *value, st
 	fr_value_box_bstrndup_shallow(value, NULL, berval->bv_val, berval->bv_len, true);
 }
 
+/** Compare a berval with a C string of a known length using case insensitive comparison
+ *
+ * @param[in] value	berval.
+ * @param[in] str	String to compare with value.
+ * @param[in] strlen	Number of characters of str to compare.
+ */
+static inline int fr_ldap_berval_strncasecmp(struct berval *value, char const *str, size_t strlen)
+{
+	size_t i;
+	if (strlen != value->bv_len) return CMP(strlen, value->bv_len);
+
+	for (i = 0; i < strlen; i++) {
+		if (tolower(value->bv_val[i]) != tolower(str[i])) return CMP(value->bv_val[i], str[i]);
+	}
+
+	return 0;
+}
+
 /** Compare two ldap trunk structures on connection URI / DN
  *
  * @param[in] one	first connection to compare.
@@ -636,6 +693,7 @@ static inline int8_t fr_ldap_trunk_cmp(void const *one, void const *two)
 	int8_t uricmp = CMP(strcmp(a->uri, b->uri), 0);
 
 	if (uricmp !=0) return uricmp;
+	if (!a->bind_dn || !b->bind_dn) return CMP(a->bind_dn, b->bind_dn);
 	return CMP(strcmp(a->bind_dn, b->bind_dn), 0);
 }
 
@@ -672,19 +730,26 @@ fr_ldap_query_t *fr_ldap_search_alloc(TALLOC_CTX *ctx,
 fr_ldap_query_t *fr_ldap_modify_alloc(TALLOC_CTX *ctx, char const *dn,
 				      LDAPMod *mods[], LDAPControl **serverctrls, LDAPControl **clientctrls);
 
+fr_ldap_query_t *fr_ldap_extended_alloc(TALLOC_CTX *ctx, char const *reqiod, struct berval *reqdata,
+					LDAPControl **serverctrls, LDAPControl **clientctrls);
+
 unlang_action_t fr_ldap_trunk_search(rlm_rcode_t *p_result,
 				     TALLOC_CTX *ctx,
 				     fr_ldap_query_t **out, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
 				     char const *base_dn, int scope, char const *filter, char const * const *attrs,
-				     LDAPControl **serverctrls, LDAPControl **clientctrls,
-				     bool is_async);
+				     LDAPControl **serverctrls, LDAPControl **clientctrls);
 
 unlang_action_t fr_ldap_trunk_modify(rlm_rcode_t *p_result,
 				     TALLOC_CTX *ctx,
 				     fr_ldap_query_t **out, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
 				     char const *dn, LDAPMod *mods[],
-				     LDAPControl **serverctrls, LDAPControl **clientctrls,
-				     bool is_async);
+				     LDAPControl **serverctrls, LDAPControl **clientctrls);
+
+unlang_action_t fr_ldap_trunk_extended(rlm_rcode_t *p_result,
+				       TALLOC_CTX *ctx,
+				       fr_ldap_query_t **out, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
+				       char const *reqoid, struct berval *reqdata,
+				       LDAPControl **serverctrls, LDAPControl **clientctrls);
 
 /*
  *	base.c - Wrappers arounds OpenLDAP functions.
@@ -708,6 +773,9 @@ fr_ldap_rcode_t	fr_ldap_search_async(int *msgid, request_t *request,
 fr_ldap_rcode_t	fr_ldap_modify_async(int *msgid, request_t *request, fr_ldap_connection_t **pconn,
 			       char const *dn, LDAPMod *mods[],
 			       LDAPControl **serverctrls, LDAPControl **clientctrls);
+
+fr_ldap_rcode_t fr_ldap_extended_async(int *msgid, request_t *request, fr_ldap_connection_t **pconn,
+				       char const *reqiod, struct berval *reqdata);
 
 fr_ldap_rcode_t	fr_ldap_error_check(LDAPControl ***ctrls, fr_ldap_connection_t const *conn,
 				    LDAPMessage *msg, char const *dn);
@@ -766,7 +834,8 @@ int		fr_ldap_conn_directory_alloc_async(fr_ldap_connection_t *ldap_conn);
 /*
  *	edir.c - Edirectory integrations
  */
-int		fr_ldap_edir_get_password(LDAP *ld, char const *dn, char *password, size_t *passlen);
+int		fr_ldap_edir_get_password(rlm_rcode_t *p_result, request_t *request, char const *dn,
+					  fr_ldap_thread_trunk_t *ttrunk, fr_dict_attr_t const *password_da);
 
 char const	*fr_ldap_edir_errstr(int code);
 
@@ -783,17 +852,6 @@ int		fr_ldap_map_expand(fr_ldap_map_exp_t *expanded, request_t *request, map_lis
 
 int		fr_ldap_map_do(request_t *request,
 			       char const *valuepair_attr, fr_ldap_map_exp_t const *expanded, LDAPMessage *entry);
-
-/*
- *	sasl_s.c - SASL synchronous bind functions
- */
-#ifdef WITH_SASL
-fr_ldap_rcode_t	 fr_ldap_sasl_interactive(request_t *request,
-					  fr_ldap_connection_t *pconn, char const *dn,
-					  char const *password, fr_ldap_sasl_t const *sasl,
-					  LDAPControl **serverctrls, LDAPControl **clientctrls,
-					  fr_time_delta_t timeout);
-#endif
 
 /*
  *	connection.c - Connection configuration functions
@@ -814,6 +872,8 @@ fr_ldap_thread_trunk_t	*fr_thread_ldap_trunk_get(fr_ldap_thread_t *thread, char 
 					       request_t *request, fr_ldap_config_t const *config);
 
 fr_trunk_state_t fr_thread_ldap_trunk_state(fr_ldap_thread_t *thread, char const *uri, char const *bind_dn);
+
+fr_ldap_thread_trunk_t	*fr_thread_ldap_bind_trunk_get(fr_ldap_thread_t *thread);
 
 /*
  *	state.c - Connection state machine
@@ -839,6 +899,18 @@ int		fr_ldap_sasl_bind_async(fr_ldap_connection_t *c,
 			    		char const *proxy,
 			    		char const *realm,
 			    		LDAPControl **serverctrls, LDAPControl **clientctrls);
+
+int		fr_ldap_sasl_bind_auth_send(fr_ldap_sasl_ctx_t *sasl_ctx,
+					    int *msgid,
+					    fr_ldap_connection_t *ldap_conn);
+
+int		fr_ldap_sasl_bind_auth_async(request_t *request,
+					     fr_ldap_thread_t *thread,
+					     char const *mechs,
+					     char const *dn,
+					     char const *identity,
+					     char const *password,
+					     char const *proxy, char const *realm);
 #endif
 
 /*

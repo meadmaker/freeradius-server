@@ -245,6 +245,27 @@ static xlat_inst_t *xlat_inst_alloc(xlat_exp_t *node)
 		}
 	}
 
+	/*
+	 *	If the xlat has a call env defined, parse it.
+	 */
+	if (call->func->call_env) {
+		size_t			count, vallen = 0;
+		CONF_SECTION		*cs = call->func->mctx->inst->conf;
+		call_method_env_t const	*call_env = call->func->call_env;
+
+		count = call_env_count(&vallen, cs, call_env->env);
+		MEM(xi->call_env_ctx = _talloc_pooled_object(xi, 0, "call_env_ctx", count * 4,
+					(sizeof(call_env_parsed_t) + sizeof(tmpl_t)) * count + vallen * 2));
+		call_env_parsed_init(&xi->call_env_parsed);
+		if (call_env_parse(xi->call_env_ctx, &xi->call_env_parsed, call->func->mctx->inst->name,
+				   call->dict, call->func->mctx->inst->conf, call_env->env) < 0) {
+			talloc_free(xi);
+			return NULL;
+		}
+		fr_assert_msg(call_env->inst_size, "Method environment for module %s, xlat %s declared, "
+			      "but no inst_size set", call->func->mctx->inst->name, call->func->name);
+	}
+
 	return xi;
 }
 
@@ -293,14 +314,17 @@ static int _xlat_instantiate_ephemeral_walker(xlat_exp_t *node, void *uctx)
 	 *	Instantiate immediately unlike permanent XLATs
 	 *	Where it's a separate phase.
 	 */
-	if (call->func->instantiate &&
-	    (call->func->instantiate(XLAT_INST_CTX(xi->data,
-		    				   xi->node,
-						   call->func->mctx,
-						   call->func->uctx)) < 0)) {
-	error:
-		TALLOC_FREE(call->inst);
-		return -1;
+	if (call->func->instantiate) {
+	    	XLAT_VERIFY(xi->node);
+		if (call->func->instantiate(XLAT_INST_CTX(xi->data,
+							  xi->node,
+							  call->func->mctx,
+							  call->func->uctx)) < 0) {
+		error:
+			TALLOC_FREE(call->inst);
+			return -1;
+		}
+		XLAT_VERIFY(xi->node);
 	}
 
 	/*
@@ -309,13 +333,17 @@ static int _xlat_instantiate_ephemeral_walker(xlat_exp_t *node, void *uctx)
 	xt = node->call.thread_inst = xlat_thread_inst_alloc(node, el, call->inst);
 	if (!xt) goto error;
 
-	if (call->func->thread_instantiate &&
-	    (call->func->thread_instantiate(XLAT_THREAD_INST_CTX(xi->data,
-	    					 		 xt->data,
-	    					 		 xi->node,
-	    					 		 xt->mctx,
-	    					 		 el,
-	    					 		 call->func->thread_uctx)) < 0)) goto error;
+	if (call->func->thread_instantiate) {
+	    	XLAT_VERIFY(xi->node);
+		if (call->func->thread_instantiate(XLAT_THREAD_INST_CTX(xi->data,
+	    					   xt->data,
+	    					   xi->node,
+	    					   xt->mctx,
+	    					   el,
+	    					   call->func->thread_uctx)) < 0) goto error;
+	    	XLAT_VERIFY(xi->node);
+	}
+
 
 	return 0;
 }
@@ -641,7 +669,5 @@ int xlat_inst_remove(xlat_exp_t *node)
 		TALLOC_FREE(node->call.inst);
 	}
 
-
-	node->type = XLAT_INVALID;
 	return 0;
 }

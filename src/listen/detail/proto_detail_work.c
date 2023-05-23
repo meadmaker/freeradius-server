@@ -25,6 +25,7 @@
 #include <netdb.h>
 #include <freeradius-devel/server/protocol.h>
 #include <freeradius-devel/server/pair.h>
+#include <freeradius-devel/server/main_loop.h>
 #include <freeradius-devel/io/application.h>
 #include <freeradius-devel/io/listen.h>
 #include <freeradius-devel/util/syserror.h>
@@ -154,6 +155,7 @@ static ssize_t mod_read(fr_listen_t *li, void **packet_ctx, fr_time_t *recv_time
 
 	fr_assert(*leftover < buffer_len);
 	fr_assert(thread->fd >= 0);
+	fr_assert(thread->el);
 
 	MPRINT("AT COUNT %d offset %ld", thread->count, (long) thread->read_offset);
 
@@ -715,12 +717,26 @@ static int mod_open(fr_listen_t *li)
 	fr_assert(thread->filename_work != NULL);
 	thread->name = talloc_typed_asprintf(thread, "detail_work reading file %s", thread->filename_work);
 
+	/*
+	 *	Linux doesn't like us adding write callbacks for FDs
+	 *	which reference files.  Since the callback is only
+	 *	used when the FD blocks, and files don't (mostly)
+	 *	block, we just mark this read-only.
+	 *
+	 *	The code in src/lib/io/network.c will call the
+	 *	mod_write() callback on any write, even if the
+	 *	listener is marked "read_only"
+	 */
+	li->no_write_callback = true;
+
 	return 0;
 }
 
 
 static int mod_close_internal(proto_detail_work_thread_t *thread)
 {
+	proto_detail_work_t const	*inst = talloc_get_type_abort_const(thread->inst, proto_detail_work_t);
+
 	/*
 	 *	One less worker...  we check for "0" because of the
 	 *	hacks in proto_detail which let us start up with
@@ -750,6 +766,11 @@ static int mod_close_internal(proto_detail_work_thread_t *thread)
 	 */
 	if (thread->listen) {
 		talloc_free(thread->listen);
+	}
+
+	if (inst->parent->exit_when_done) {
+		fr_event_list_t *el = main_loop_event_list();
+		fr_event_loop_exit(el, 1);
 	}
 
 	return 0;
@@ -817,9 +838,9 @@ static char const *mod_name(fr_listen_t *li)
 static int mod_instantiate(module_inst_ctx_t const *mctx)
 {
 	proto_detail_work_t *inst = talloc_get_type_abort(mctx->inst->data, proto_detail_work_t);
-	RADCLIENT *client;
+	fr_client_t *client;
 
-	client = inst->client = talloc_zero(inst, RADCLIENT);
+	client = inst->client = talloc_zero(inst, fr_client_t);
 	if (!inst->client) return 0;
 
 	client->ipaddr.af = AF_INET;

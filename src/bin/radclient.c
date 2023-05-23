@@ -49,7 +49,14 @@ typedef struct request_s request_t;	/* to shut up warnings about mschap.h */
 
 #include "radclient.h"
 
-#define pair_update_request(_attr, _da) fr_pair_update_by_da(request, _attr, &request->request_pairs, _da, 0)
+#define pair_update_request(_attr, _da) do { \
+		_attr = fr_pair_find_by_da(&request->request_pairs, NULL, _da); \
+		if (!_attr) { \
+			_attr = fr_pair_afrom_da(request, _da); \
+			assert(_attr != NULL); \
+			fr_pair_append(&request->request_pairs, _attr); \
+		} \
+	} while (0)
 #define request_pairs	request_list
 #define reply_pairs	reply_list
 
@@ -618,11 +625,11 @@ static int radclient_init(TALLOC_CTX *ctx, rc_file_pair_t *files)
 				/*
 				 *	CHAP-Password is octets, so it may not be zero terminated.
 				 */
-				MEM(pair_update_request(&request->password, attr_cleartext_password) >= 0);
+				pair_update_request(request->password, attr_cleartext_password);
 				fr_pair_value_bstrndup(request->password, vp->vp_strvalue, vp->vp_length, true);
 			} else if ((vp->da == attr_user_password) ||
 				   (vp->da == attr_ms_chap_password)) {
-				MEM(pair_update_request(&request->password, attr_cleartext_password) >= 0);
+				pair_update_request(request->password, attr_cleartext_password);
 				fr_pair_value_bstrndup(request->password, vp->vp_strvalue, vp->vp_length, true);
 
 			} else if (vp->da == attr_radclient_test_name) {
@@ -933,7 +940,7 @@ static int send_one_packet(rc_request_t *request)
 			int mysockfd;
 
 			if (ipproto == IPPROTO_TCP) {
-				mysockfd = fr_socket_client_tcp(NULL,
+				mysockfd = fr_socket_client_tcp(NULL, NULL,
 								&request->packet->socket.inet.dst_ipaddr,
 								request->packet->socket.inet.dst_port, false);
 				if (mysockfd < 0) {
@@ -949,7 +956,7 @@ static int send_one_packet(rc_request_t *request)
 					return -1;
 				}
 
-				if (fr_socket_bind(mysockfd, &client_ipaddr, &port, NULL) < 0) {
+				if (fr_socket_bind(mysockfd, NULL, &client_ipaddr, &port) < 0) {
 					fr_perror("Error binding socket");
 					return -1;
 				}
@@ -1774,7 +1781,7 @@ int main(int argc, char **argv)
 	if (client_port == 0) client_port = request->packet->socket.inet.src_port;
 
 	if (ipproto == IPPROTO_TCP) {
-		sockfd = fr_socket_client_tcp(NULL, &server_ipaddr, server_port, false);
+		sockfd = fr_socket_client_tcp(NULL, NULL, &server_ipaddr, server_port, false);
 		if (sockfd < 0) {
 			ERROR("Failed opening socket");
 			return -1;
@@ -1787,7 +1794,7 @@ int main(int argc, char **argv)
 			return -1;
 		}
 
-		if (fr_socket_bind(sockfd, &client_ipaddr, &client_port, NULL) < 0) {
+		if (fr_socket_bind(sockfd, NULL, &client_ipaddr, &client_port) < 0) {
 			fr_perror("Error binding socket");
 			return -1;
 		}
@@ -1800,7 +1807,7 @@ int main(int argc, char **argv)
 			return -1;
 		}
 
-		if (fr_socket_bind(coafd, &client_ipaddr, &coa_port, NULL) < 0) {
+		if (fr_socket_bind(coafd, NULL, &client_ipaddr, &coa_port) < 0) {
 			fr_perror("Error binding socket");
 			return -1;
 		}

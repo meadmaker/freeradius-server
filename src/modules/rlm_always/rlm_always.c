@@ -28,6 +28,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 /*
  *	The instance data for rlm_always is the list of fake values we are
@@ -65,7 +66,7 @@ static xlat_arg_parser_t const always_xlat_args[] = {
  */
 static xlat_action_t always_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 xlat_ctx_t const *xctx,
-				 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				 request_t *request, fr_value_box_list_t *in)
 {
 	rlm_always_t		*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_always_t);
 	module_instance_t	*mi = inst->mi;
@@ -125,8 +126,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		return -1;
 	}
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, always_xlat, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, always_xlat_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, always_xlat, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, always_xlat_args);
 
 	return 0;
 }

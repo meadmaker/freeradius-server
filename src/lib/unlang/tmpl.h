@@ -83,7 +83,7 @@ typedef struct {
 		}, \
 	}
 
-/** A callback when the request gets a fr_state_signal_t.
+/** A callback when the request gets a fr_signal_t.
  *
  * A module may call unlang_yeild(), but still need to do something on FR_SIGNAL_DUP.  If so, it's
  * set here.
@@ -94,19 +94,20 @@ typedef struct {
  * @param[in] request		The current request.
  * @param[in] action		which is signalling the request.
  */
-typedef void (*fr_unlang_tmpl_signal_t)(request_t *request, void *rctx, fr_state_signal_t action);
+typedef void (*fr_unlang_tmpl_signal_t)(request_t *request, void *rctx, fr_signal_t action);
 
 /** A callback for when the request is resumed.
  *
  * The resumed request cannot call the normal "authorize", etc. method.  It needs a separate callback.
  *
+ * @param[in] p_result		the module return code.
  * @param[in] request		the current request.
  * @param[in] rctx		a local context for the callback.
  * @return an unlang action.
  */
 typedef unlang_action_t (*fr_unlang_tmpl_resume_t)(rlm_rcode_t *p_result, request_t *request, void *rctx);
 
-int		unlang_tmpl_push(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out,
+int		unlang_tmpl_push(TALLOC_CTX *ctx, fr_value_box_list_t *out,
 				 request_t *request, tmpl_t const *tmpl, unlang_tmpl_args_t *args)
 		CC_HINT(warn_unused_result);
 

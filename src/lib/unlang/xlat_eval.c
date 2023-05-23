@@ -24,7 +24,6 @@
  * @copyright 2000,2006 The FreeRADIUS server project
  * @copyright 2000 Alan DeKok (aland@freeradius.org)
  */
-
 RCSID("$Id$")
 
 #include <freeradius-devel/server/base.h>
@@ -32,6 +31,8 @@ RCSID("$Id$")
 #include <freeradius-devel/unlang/xlat_priv.h>
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/util/types.h>
+#include <freeradius-devel/util/sbuff.h>
+#include <freeradius-devel/util/value.h>
 
 #include <freeradius-devel/unlang/unlang_priv.h>	/* Remove when everything uses new xlat API */
 
@@ -47,9 +48,9 @@ static fr_dict_autoload_t xlat_eval_dict[] = {
 	{ NULL }
 };
 
-fr_dict_attr_t const	    *attr_expr_bool_enum; /* xlat_expr.c */
-fr_dict_attr_t const		*attr_module_return_code; /* xlat_expr.c */
-fr_dict_attr_t const		*attr_cast_base; /* xlat_expr.c */
+fr_dict_attr_t const *attr_expr_bool_enum; /* xlat_expr.c */
+fr_dict_attr_t const *attr_module_return_code; /* xlat_expr.c */
+fr_dict_attr_t const *attr_cast_base; /* xlat_expr.c */
 
 static fr_dict_attr_autoload_t xlat_eval_dict_attr[] = {
 	{ .out = &attr_module_return_code, .name = "Module-Return-Code", .type = FR_TYPE_UINT32, .dict = &dict_freeradius },
@@ -72,46 +73,46 @@ static ssize_t xlat_eval_sync(TALLOC_CTX *ctx, char **out, request_t *request, x
 
 /** Reconstruct the original expansion string from an xlat tree
  *
- * @param[in] ctx	to allocate result in.
+ * @param[in] out	sbuff to print result in.
  * @param[in] node	in the tree to start printing.
  * @return
  *	- The original expansion string on success.
  *	- NULL on error.
  */
-static char *xlat_fmt_aprint(TALLOC_CTX *ctx, xlat_exp_t const *node)
+static fr_slen_t xlat_fmt_print(fr_sbuff_t *out, xlat_exp_t const *node)
 {
 	switch (node->type) {
 	case XLAT_BOX:
 	case XLAT_GROUP:
 		fr_assert(node->fmt != NULL);
-		return talloc_asprintf(ctx, "%s", node->fmt);
+		return fr_sbuff_in_strcpy(out, node->fmt);
 
 	case XLAT_ONE_LETTER:
 		fr_assert(node->fmt != NULL);
-		return talloc_asprintf(ctx, "%%%s", node->fmt);
+		return fr_sbuff_in_sprintf(out, "%%%s", node->fmt);
 
 	case XLAT_TMPL:
 		fr_assert(node->fmt != NULL);
 		if (tmpl_is_attr(node->vpt) && (node->fmt[0] == '&')) {
-			return talloc_strdup(ctx, node->fmt);
+			return fr_sbuff_in_strcpy(out, node->fmt);
 		} else {
-			return talloc_asprintf(ctx, "%%{%s}", node->fmt);
+			return fr_sbuff_in_sprintf(out, "%%{%s}", node->fmt);
 		}
 
 	case XLAT_VIRTUAL:
-		return talloc_asprintf(ctx, "%%{%s}", node->call.func->name);
+		return fr_sbuff_in_sprintf(out, "%%{%s}", node->call.func->name);
 
 #ifdef HAVE_REGEX
 	case XLAT_REGEX:
-		return talloc_asprintf(ctx, "%%{%u}", node->regex_index);
+		return fr_sbuff_in_sprintf(out, "%%{%u}", node->regex_index);
 #endif
 
 	case XLAT_FUNC:
 	{
-		char		 	*out, *n_out;
-		TALLOC_CTX		*pool;
 		char			open = '{', close = '}';
 		bool			first_done = false;
+		fr_sbuff_t 		our_out;
+		fr_slen_t		slen;
 
 		if (node->call.func->input_type == XLAT_INPUT_ARGS) {
 			open = '(';
@@ -121,59 +122,52 @@ static char *xlat_fmt_aprint(TALLOC_CTX *ctx, xlat_exp_t const *node)
 		/*
 		 *	No arguments, just print an empty function.
 		 */
-		if (!xlat_exp_head(node->call.args)) return talloc_asprintf(ctx, "%%%c%s:%c", open, node->call.func->name, close);
+		if (!xlat_exp_head(node->call.args)) return fr_sbuff_in_sprintf(out, "%%%c%s:%c", open, node->call.func->name, close);
 
-		out = talloc_asprintf(ctx, "%%%c%s:", open, node->call.func->name);
-		pool = talloc_pool(NULL, 128);	/* Size of a single child (probably ok...) */
+		our_out = FR_SBUFF(out);
+		FR_SBUFF_IN_SPRINTF_RETURN(&our_out, "%%%c%s:", open, node->call.func->name);
 
 		xlat_exp_foreach(node->call.args, arg) {
-			char *arg_str;
-
-			arg_str = xlat_fmt_aprint(pool, arg);
-			if (arg_str) {
-				if ((first_done) && (node->call.func->input_type == XLAT_INPUT_ARGS)) {
-					n_out = talloc_strdup_append_buffer(out, " ");
-					if (!n_out) {
-					child_error:
-						talloc_free(out);
-						talloc_free(pool);
-						return NULL;
-					}
-					out = n_out;
-				}
-
-				n_out = talloc_buffer_append_buffer(ctx, out, arg_str);
-				if (!n_out) goto child_error;
-				out = n_out;
-				first_done = true;
+			if ((first_done) && (node->call.func->input_type == XLAT_INPUT_ARGS)) {
+				FR_SBUFF_IN_CHAR_RETURN(&our_out, ' ');
 			}
-			talloc_free_children(pool);	/* Clear pool contents */
-		}
-		talloc_free(pool);
 
-		n_out = talloc_strndup_append_buffer(out, &close, 1);
-		if (!n_out) {
-			talloc_free(out);
-			return NULL;
+			slen = xlat_fmt_print(&our_out, arg);
+			if (slen < 0) return slen - fr_sbuff_used(&our_out);
+
+			first_done = true;
 		}
-		return n_out;
+
+		FR_SBUFF_IN_CHAR_RETURN(&our_out, close);
+		return fr_sbuff_set(out, &our_out);
 	}
 
 	case XLAT_ALTERNATE:
 	{
-		char *first, *second, *result;
+		fr_sbuff_t 	our_out = FR_SBUFF(out);
+		fr_slen_t	slen;
 
-		first = xlat_fmt_aprint(NULL, xlat_exp_head(node->alternate[0]));
-		second = xlat_fmt_aprint(NULL, xlat_exp_head(node->alternate[1]));
-		result = talloc_asprintf(ctx, "%%{%s:-%s}", first, second);
-		talloc_free(first);
-		talloc_free(second);
+		FR_SBUFF_IN_STRCPY_LITERAL_RETURN(&our_out, "%{");
 
-		return result;
+		xlat_exp_foreach(node->alternate[0], child) {
+			slen = xlat_fmt_print(&our_out, child);
+			if (slen < 0) return slen - fr_sbuff_used(&our_out);
+		}
+
+		FR_SBUFF_IN_STRCPY_LITERAL_RETURN(&our_out, ":-");
+
+		xlat_exp_foreach(node->alternate[1], child) {
+			slen = xlat_fmt_print(&our_out, child);
+			if (slen < 0) return slen - fr_sbuff_used(&our_out);
+		}
+
+		FR_SBUFF_IN_STRCPY_LITERAL_RETURN(&our_out, "}");
+
+		return fr_sbuff_set(out, &our_out);
 	}
 
 	default:
-		return NULL;
+		return 0;
 	}
 }
 
@@ -182,8 +176,9 @@ static char *xlat_fmt_aprint(TALLOC_CTX *ctx, xlat_exp_t const *node)
  * @param[in] request	The current request.
  * @param[in] node	Being processed.
  * @param[in] args	from previous expansion.
+ * @param[in] line	Unused
  */
-static inline void xlat_debug_log_expansion(request_t *request, xlat_exp_t const *node, FR_DLIST_HEAD(fr_value_box_list) const *args, UNUSED int line)
+static inline void xlat_debug_log_expansion(request_t *request, xlat_exp_t const *node, fr_value_box_list_t const *args, UNUSED int line)
 {
 	if (node->flags.constant) return;
 
@@ -201,20 +196,25 @@ static inline void xlat_debug_log_expansion(request_t *request, xlat_exp_t const
 			node->call.func->name, args,
 			(node->call.func->input_type == XLAT_INPUT_ARGS) ? ')' : '}');
 	} else {
-		char *str;
+		fr_sbuff_t *agg;
 
-		str = xlat_fmt_aprint(NULL, node);
-		RDEBUG2("| %s", str); /* print line number here for debugging */
-		talloc_free(str);
+		FR_SBUFF_TALLOC_THREAD_LOCAL(&agg, 1024, SIZE_MAX);
+
+		if (xlat_fmt_print(agg, node) < 0) {
+			RERROR("Failed printing expansion");
+			return;
+		}
+		RDEBUG2("| %s", fr_sbuff_start(agg)); /* print line number here for debugging */
 	}
 }
 
 /** Output the list result of an expansion
  *
  * @param[in] request	The current request.
+ * @param[in] node	which was expanded.
  * @param[in] result	of the expansion.
  */
-static inline void xlat_debug_log_list_result(request_t *request, xlat_exp_t const *node, FR_DLIST_HEAD(fr_value_box_list) const *result)
+static inline void xlat_debug_log_list_result(request_t *request, xlat_exp_t const *node, fr_value_box_list_t const *result)
 {
 	if (node->flags.constant) return;
 
@@ -226,6 +226,7 @@ static inline void xlat_debug_log_list_result(request_t *request, xlat_exp_t con
 /** Output the result of an expansion
  *
  * @param[in] request	The current request.
+ * @param[in] node	which was expanded.
  * @param[in] result	of the expansion.
  */
 static inline void xlat_debug_log_result(request_t *request, xlat_exp_t const *node, fr_value_box_t const *result)
@@ -249,7 +250,7 @@ static inline void xlat_debug_log_result(request_t *request, xlat_exp_t const *n
  *	- XLAT_ACTION_DONE on success.
  *	- XLAT_ACTION_FAIL on failure.
  */
-static xlat_action_t xlat_process_arg_list(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *list, request_t *request,
+static xlat_action_t xlat_process_arg_list(TALLOC_CTX *ctx, fr_value_box_list_t *list, request_t *request,
 					   char const *name, xlat_arg_parser_t const *arg, unsigned int arg_num)
 {
 	fr_value_box_t *vb;
@@ -258,14 +259,14 @@ static xlat_action_t xlat_process_arg_list(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_val
 do { \
 	if ((_arg)->func && ((_vb)->tainted || (_arg)->always_escape) && \
 	    ((_arg)->func(request, _vb, (_arg)->uctx) < 0)) { \
-		RPEDEBUG("Function %s failed escaping argument %u", name, _arg_num); \
+		RPEDEBUG("Function \"%s\" failed escaping argument %u", name, _arg_num); \
 		return XLAT_ACTION_FAIL; \
 	} \
 } while (0)
 
 	if (fr_value_box_list_empty(list)) {
 		if (arg->required) {
-			RWDEBUG("Function %s is missing required argument %u", name, arg_num);
+			REDEBUG("Function \"%s\" is missing required argument %u", name, arg_num);
 			return XLAT_ACTION_FAIL;
 		}
 		return XLAT_ACTION_DONE;
@@ -288,7 +289,7 @@ do { \
 						      vb, list, arg->type,
 						      FR_VALUE_BOX_LIST_FREE, true,
 						      SIZE_MAX) < 0) {
-			RPEDEBUG("Function %s failed concatenating arguments to type %s", name, fr_type_to_str(arg->type));
+			RPEDEBUG("Function \"%s\" failed concatenating arguments to type %s", name, fr_type_to_str(arg->type));
 			return XLAT_ACTION_FAIL;
 		}
 		fr_assert(fr_value_box_list_num_elements(list) <= 1);
@@ -302,7 +303,7 @@ do { \
 	 */
 	if (arg->single) {
 		if (fr_value_box_list_num_elements(list) > 1) {
-			RPEDEBUG("Function %s was provided an incorrect number of values at argument %u, "
+			RPEDEBUG("Function \"%s\" was provided an incorrect number of values at argument %u, "
 				 "expected %s got %u",
 				 name, arg_num,
 				 arg->required ? "0-1" : "1",
@@ -316,7 +317,7 @@ do { \
 		cast_error:
 			if (fr_value_box_cast_in_place(ctx, vb,
 						       arg->type, NULL) < 0) {
-				RPEDEBUG("Function %s failed cast argument %u to type %s", name, arg_num, fr_type_to_str(arg->type));
+				RPEDEBUG("Function \"%s\" failed to cast argument %u to type %s", name, arg_num, fr_type_to_str(arg->type));
 				return XLAT_ACTION_FAIL;
 			}
 		}
@@ -359,10 +360,12 @@ do { \
  * @param[in,out] list		value boxes provided as input.
  * 				List will be modified in accordance to rules
  * 				provided in the args array.
+ * @param[in] request		being processed.
  * @param[in] func		to call
  */
 static inline CC_HINT(always_inline)
-xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *list, request_t *request, xlat_t const *func)
+xlat_action_t xlat_process_args(TALLOC_CTX *ctx, fr_value_box_list_t *list,
+				request_t *request, xlat_t const *func)
 {
 	xlat_arg_parser_t const	*arg_p = func->args;
 	xlat_action_t		xa;
@@ -384,11 +387,6 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list
 	 *	xlat takes all input as a single vb.
 	 */
 	case XLAT_INPUT_MONO:
-		return xlat_process_arg_list(ctx, list, request, func->name, arg_p, 1);
-
-	/*
-	 *	xlat consumes a sequence of arguments.
-	 */
 	case XLAT_INPUT_ARGS:
 		vb = fr_value_box_list_head(list);
 		while (arg_p->type != FR_TYPE_NULL) {
@@ -401,12 +399,13 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list
 			if (!vb) {
 				if (arg_p->required) {
 				missing:
-					REDEBUG("Function %s is missing required argument %u", func->name, (unsigned int)((arg_p - func->args) + 1));
+					REDEBUG("Function \"%s\" is missing required argument %u",
+						 func->name, (unsigned int)((arg_p - func->args) + 1));
 					return XLAT_ACTION_FAIL;
 				}
 
 				/*
-				 *	The argument isn't required.  Just omit it.  xlat_func_args() enforces
+				 *	The argument isn't required.  Just omit it.  xlat_func_args_set() enforces
 				 *	that optional arguments are at the end of the argument list.
 				 */
 				return XLAT_ACTION_DONE;
@@ -432,11 +431,24 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list
 			 */
 			if (fr_value_box_list_empty(&vb->vb_group)) {
 				/*
+				 *	Variadic rules deal with empty boxes differently...
+				 */
+				switch (arg_p->variadic) {
+				case XLAT_ARG_VARIADIC_EMPTY_SQUASH:
+					fr_value_box_list_talloc_free_head(list);
+					continue;
+
+				case XLAT_ARG_VARIADIC_EMPTY_KEEP:
+					goto empty_ok;
+
+				case XLAT_ARG_VARIADIC_DISABLED:
+					break;
+				}
+
+				/*
 				 *	Empty groups for optional arguments are OK, we can just stop processing the list.
 				 */
 				if (!arg_p->required) {
-					fr_assert(!next);
-
 					/*
 					 *	If the caller doesn't care about the type, then we leave the
 					 *	empty group there.
@@ -456,8 +468,7 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list
 					 *	accessing the box as vb_uint8, hoping that it's being passed
 					 *	the right thing.
 					 */
-					fr_value_box_list_remove(list, vb);
-					talloc_free(vb);
+					fr_value_box_list_talloc_free_head(list);
 					break;
 				}
 
@@ -471,13 +482,23 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list
 				if (arg_p->type != FR_TYPE_VOID) goto missing;
 			}
 
+		empty_ok:
 			/*
 			 *	In some cases we replace the current argument with the head of the group.
 			 *
 			 *	xlat_process_arg_list() has already done concatenations for us.
 			 */
 			if (arg_p->single || arg_p->concat) {
-				fr_value_box_list_replace(list, vb, fr_value_box_list_pop_head(&vb->vb_group));
+				fr_value_box_t *head = fr_value_box_list_pop_head(&vb->vb_group);
+
+				/*
+				 *	If we're meant to be smashing the argument
+				 *	to a single box, but the group was empty,
+				 *	add a null box instead so ordering is maintained
+				 *	for subsequent boxes.
+				 */
+				if (!head) head = fr_value_box_alloc_null(ctx);
+				fr_value_box_list_replace(list, vb, head);
 				talloc_free(vb);
 			}
 
@@ -506,7 +527,7 @@ xlat_action_t xlat_process_args(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list
  *	- false - If the return values were incorrect.
  */
 static inline CC_HINT(nonnull(1,2,3))
-bool xlat_process_return(request_t *request, xlat_t const *func, FR_DLIST_HEAD(fr_value_box_list) const *returned, fr_value_box_t *pos)
+bool xlat_process_return(request_t *request, xlat_t const *func, fr_value_box_list_t const *returned, fr_value_box_t *pos)
 {
 	unsigned int count = 0;
 
@@ -553,7 +574,8 @@ bool xlat_process_return(request_t *request, xlat_t const *func, FR_DLIST_HEAD(f
  *
  */
 static inline CC_HINT(always_inline)
-xlat_action_t xlat_eval_one_letter(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, request_t *request, char letter)
+xlat_action_t xlat_eval_one_letter(TALLOC_CTX *ctx, fr_value_box_list_t *out,
+				   request_t *request, char letter)
 {
 
 	char		buffer[64];
@@ -740,12 +762,12 @@ xlat_action_t xlat_eval_one_letter(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_l
 
 typedef struct {
 	int			status;
-	FR_DLIST_HEAD(fr_value_box_list)	list;
+	fr_value_box_list_t	list;
 } xlat_exec_rctx_t;
 
 static xlat_action_t xlat_exec_resume(UNUSED TALLOC_CTX *ctx, fr_dcursor_t *out,
 				      xlat_ctx_t const *xctx,
-				      UNUSED request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+				      UNUSED request_t *request, UNUSED fr_value_box_list_t *in)
 {
 	xlat_exec_rctx_t *rctx = talloc_get_type_abort(xctx->rctx, xlat_exec_rctx_t);
 
@@ -754,7 +776,7 @@ static xlat_action_t xlat_exec_resume(UNUSED TALLOC_CTX *ctx, fr_dcursor_t *out,
 		return XLAT_ACTION_FAIL;
 	}
 
-	fr_value_box_list_move((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist, &rctx->list);
+	fr_value_box_list_move((fr_value_box_list_t *)out->dlist, &rctx->list);
 
 	return XLAT_ACTION_DONE;
 }
@@ -770,27 +792,36 @@ static xlat_action_t xlat_exec_resume(UNUSED TALLOC_CTX *ctx, fr_dcursor_t *out,
  * @param[in] action		What the request should do (the type of signal).
  */
 void xlat_signal(xlat_func_signal_t signal, xlat_exp_t const *exp,
-		 request_t *request, void *rctx, fr_state_signal_t action)
+		 request_t *request, void *rctx, fr_signal_t action)
 {
 	xlat_thread_inst_t *t = xlat_thread_instance_find(exp);
 
-	signal(XLAT_CTX(exp->call.inst, t->data, t->mctx, rctx), request, action);
+	signal(XLAT_CTX(exp->call.inst, t->data, t->mctx, NULL, rctx), request, action);
 }
 
 /** Call an xlat's resumption method
  *
  * @param[in] ctx		to allocate value boxes in.
  * @param[out] out		a list of #fr_value_box_t to append to.
- * @param[in] resume		function to call.
+ * @param[out] child		to evaluate. If a child needs to be evaluated
+ *				by the caller, we return XLAT_ACTION_PUSH_CHILD
+ *				and place the child to be evaluated here.
+ *				Once evaluation is complete, the caller
+ *				should call us with the same #xlat_exp_t and the
+ *				result of the nested evaluation in result.
  * @param[in] request		the current request.
+ * @param[in] head		of the list to evaluate
+ * @param[in,out] in		xlat node to evaluate. Advanced as we process
+ *				additional #xlat_exp_t.
  * @param[in] result		Previously expanded arguments to this xlat function.
+ * @param[in] resume		function to call.
  * @param[in] rctx		Opaque (to us), resume ctx provided by xlat function
  *				when it yielded.
  */
 xlat_action_t xlat_frame_eval_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
-				       xlat_exp_head_t const **child,
-				       request_t *request,  xlat_exp_head_t const *head, xlat_exp_t const **in,
-				       FR_DLIST_HEAD(fr_value_box_list) *result, xlat_func_t resume, void *rctx)
+				     xlat_exp_head_t const **child,
+				     request_t *request,  xlat_exp_head_t const *head, xlat_exp_t const **in,
+				     fr_value_box_list_t *result, xlat_func_t resume, void *rctx)
 {
 	xlat_action_t		xa;
 	xlat_exp_t const	*node = *in;
@@ -804,11 +835,11 @@ xlat_action_t xlat_frame_eval_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	VALUE_BOX_TALLOC_LIST_VERIFY(result);
 
 	if (node->type != XLAT_FUNC) {
-		xa = resume(ctx, out, XLAT_CTX(NULL, NULL, NULL, rctx), request, result);
+		xa = resume(ctx, out, XLAT_CTX(NULL, NULL, NULL, NULL, rctx), request, result);
 	} else {
 		xlat_thread_inst_t *t;
 		t = xlat_thread_instance_find(node);
-		xa = resume(ctx, out, XLAT_CTX(node->call.inst->data, t->data, t->mctx, rctx), request, result);
+		xa = resume(ctx, out, XLAT_CTX(node->call.inst->data, t->data, t->mctx, NULL, rctx), request, result);
 		VALUE_BOX_TALLOC_LIST_VERIFY(result);
 
 		RDEBUG2("| %%%c%s:...%c",
@@ -826,7 +857,7 @@ xlat_action_t xlat_frame_eval_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 		fr_dcursor_next(out);		/* Wind to the start of this functions output */
 		RDEBUG2("| --> %pV", fr_dcursor_current(out));
 		if (node->call.func &&
-		    !xlat_process_return(request, node->call.func, (FR_DLIST_HEAD(fr_value_box_list) *)out->dlist,
+		    !xlat_process_return(request, node->call.func, (fr_value_box_list_t *)out->dlist,
 					 fr_dcursor_current(out))) {
 			return XLAT_ACTION_FAIL;
 		}
@@ -861,12 +892,13 @@ xlat_action_t xlat_frame_eval_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
  * @param[in] head		of the list to evaluate
  * @param[in,out] in		xlat node to evaluate.  Advanced as we process
  *				additional #xlat_exp_t.
+ * @param[in] env_data		Expanded call env.
  * @param[in] result		of a previous nested evaluation.
  */
 xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				     xlat_exp_head_t const **child, bool *alternate,
 				     request_t *request, xlat_exp_head_t const *head, xlat_exp_t const **in,
-				     FR_DLIST_HEAD(fr_value_box_list) *result)
+				     void *env_data, fr_value_box_list_t *result)
 {
 	xlat_exp_t const	*node = *in;
 
@@ -877,7 +909,7 @@ xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	{
 		xlat_action_t		xa;
 		xlat_thread_inst_t	*t;
-		FR_DLIST_HEAD(fr_value_box_list)	result_copy;
+		fr_value_box_list_t	result_copy;
 
 		t = xlat_thread_instance_find(node);
 		fr_assert(t);
@@ -910,7 +942,7 @@ xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 		VALUE_BOX_TALLOC_LIST_VERIFY(result);
 		xa = node->call.func->func(ctx, out,
-					   XLAT_CTX(node->call.inst->data, t->data, t->mctx, NULL),
+					   XLAT_CTX(node->call.inst->data, t->data, t->mctx, env_data, NULL),
 					   request, result);
 		VALUE_BOX_TALLOC_LIST_VERIFY(result);
 
@@ -942,7 +974,7 @@ xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			REXDENT();
 			xlat_debug_log_result(request, *in, fr_dcursor_current(out));
 			if (!xlat_process_return(request, node->call.func,
-						 (FR_DLIST_HEAD(fr_value_box_list) *)out->dlist,
+						 (fr_value_box_list_t *)out->dlist,
 						 fr_dcursor_current(out))) return XLAT_ACTION_FAIL;
 			RINDENT();
 			break;
@@ -985,7 +1017,7 @@ xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 		xlat_debug_log_list_result(request, *in, result);
 
 		VALUE_BOX_TALLOC_LIST_VERIFY(result);
-		fr_value_box_list_move((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist, result);
+		fr_value_box_list_move((fr_value_box_list_t *)out->dlist, result);
 	}
 		break;
 
@@ -1028,7 +1060,7 @@ xlat_action_t xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 		 *	First entry is the command to run.  Subsequent entries are the options to pass to the
 		 *	command.
 		 */
-		fr_value_box_list_move((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist, result);
+		fr_value_box_list_move((fr_value_box_list_t *)out->dlist, result);
 		break;
 
 	default:
@@ -1075,7 +1107,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 {
 	xlat_action_t		xa = XLAT_ACTION_DONE;
 	xlat_exp_t const       	*node;
-	FR_DLIST_HEAD(fr_value_box_list)	result;		/* tmp list so debug works correctly */
+	fr_value_box_list_t	result;		/* tmp list so debug works correctly */
 	fr_value_box_t		*value;
 
 	fr_value_box_list_init(&result);
@@ -1089,7 +1121,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 	for (node = *in; node; node = xlat_exp_next(head, node)) {
 	     	*in = node;		/* Update node in our caller */
 		fr_dcursor_tail(out);	/* Needed for debugging */
-		VALUE_BOX_TALLOC_LIST_VERIFY((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist);
+		VALUE_BOX_TALLOC_LIST_VERIFY((fr_value_box_list_t *)out->dlist);
 
 		fr_assert(fr_value_box_list_num_elements(&result) == 0);	/* Should all have been moved */
 
@@ -1127,7 +1159,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 				goto finish;
 			}
 			xlat_debug_log_list_result(request, *in, &result);
-			fr_value_box_list_move((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist, &result);
+			fr_value_box_list_move((fr_value_box_list_t *)out->dlist, &result);
 			continue;
 
 		case XLAT_TMPL:
@@ -1146,10 +1178,10 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 				 */
 				if (tmpl_eval_cast(ctx, &result, node->vpt) < 0) goto fail;
 
-				fr_value_box_list_move((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist, &result);
+				fr_value_box_list_move((fr_value_box_list_t *)out->dlist, &result);
 				continue;
 
-			} else if (tmpl_is_attr(node->vpt) ||  tmpl_is_list(node->vpt)) {
+			} else if (tmpl_is_attr(node->vpt)) {
 				if (node->fmt[0] == '&') {
 					XLAT_DEBUG("** [%i] %s(attribute) - %s", unlang_interpret_stack_depth(request), __FUNCTION__,
 						   node->fmt);
@@ -1172,10 +1204,11 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 
 				xlat_debug_log_expansion(request, node, NULL, __LINE__);
 
-				if (unlang_xlat_yield(request, xlat_exec_resume, NULL, rctx) != XLAT_ACTION_YIELD) goto fail;
+				if (unlang_xlat_yield(request, xlat_exec_resume, NULL, 0, rctx) != XLAT_ACTION_YIELD) goto fail;
 
 				if (unlang_tmpl_push(ctx, &rctx->list, request, node->vpt,
-						     TMPL_ARGS_EXEC(NULL, fr_time_delta_from_sec(1), false, &rctx->status)) < 0) goto fail;
+						     TMPL_ARGS_EXEC(NULL, fr_time_delta_from_sec(EXEC_TIMEOUT),
+						     		    false, &rctx->status)) < 0) goto fail;
 
 				xa = XLAT_ACTION_PUSH_UNLANG;
 				goto finish;
@@ -1194,7 +1227,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 			}
 
 			xlat_debug_log_list_result(request, node, &result);
-			fr_value_box_list_move((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist, &result);
+			fr_value_box_list_move((fr_value_box_list_t *)out->dlist, &result);
 			continue;
 
 		case XLAT_VIRTUAL:
@@ -1204,7 +1237,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 
 			xlat_debug_log_expansion(request, node, NULL, __LINE__);
 			xa = node->call.func->func(ctx, out,
-						   XLAT_CTX(node->call.func->uctx, NULL, NULL, NULL),
+						   XLAT_CTX(node->call.func->uctx, NULL, NULL, NULL, NULL),
 						   request, NULL);
 			fr_dcursor_next(out);
 
@@ -1230,7 +1263,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 			 *	If there's no children we can just
 			 *	call the function directly.
 			 */
-			xa = xlat_frame_eval_repeat(ctx, out, child, NULL, request, head, in, &result);
+			xa = xlat_frame_eval_repeat(ctx, out, child, NULL, request, head, in, NULL, &result);
 			if (xa != XLAT_ACTION_DONE || (!*in)) goto finish;
 			continue;
 
@@ -1291,7 +1324,7 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 	}
 
 finish:
-	VALUE_BOX_TALLOC_LIST_VERIFY((FR_DLIST_HEAD(fr_value_box_list) *)out->dlist);
+	VALUE_BOX_TALLOC_LIST_VERIFY((fr_value_box_list_t *)out->dlist);
 	XLAT_DEBUG("** [%i] %s << %s", unlang_interpret_stack_depth(request),
 		   __FUNCTION__, fr_table_str_by_value(xlat_action_table, xa, "<INVALID>"));
 
@@ -1301,7 +1334,7 @@ finish:
 static ssize_t xlat_eval_sync(TALLOC_CTX *ctx, char **out, request_t *request, xlat_exp_head_t const * const head,
 			      xlat_escape_legacy_t escape, void const *escape_ctx)
 {
-	FR_DLIST_HEAD(fr_value_box_list)	result;
+	fr_value_box_list_t	result;
 	bool			success = false;
 	TALLOC_CTX		*pool = talloc_new(NULL);
 	rlm_rcode_t		rcode;
@@ -1343,7 +1376,7 @@ static ssize_t xlat_eval_sync(TALLOC_CTX *ctx, char **out, request_t *request, x
 			 *	For tainted boxes perform the requested escaping
 			 */
 			while ((vb = fr_value_box_list_next(&result, vb))) {
-				FR_DLIST_ENTRY(fr_value_box_list) entry;
+				fr_value_box_entry_t entry;
 				size_t len, real_len;
 				char *escaped;
 
@@ -1459,7 +1492,8 @@ ssize_t _xlat_eval(TALLOC_CTX *ctx, char **out, size_t outlen, request_t *reques
 				      NULL,
 				      &(tmpl_rules_t){
 				      	.attr = {
-				      		.dict_def = request->dict
+				      		.dict_def = request->dict,
+						.list_def = request_attr_request,
 				      	}
 				      });
 	if (len == 0) {
@@ -1593,7 +1627,7 @@ int xlat_flatten_compiled_argv(TALLOC_CTX *ctx, xlat_exp_head_t ***argv, xlat_ex
 		my_argv[i++] = talloc_steal(my_argv, node->group);
 	}
 
-	fr_value_box_list_talloc_free((FR_DLIST_HEAD(fr_value_box_list) *)&head->dlist);
+	fr_value_box_list_talloc_free((fr_value_box_list_t *)&head->dlist);
 
 	return count;
 }

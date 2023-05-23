@@ -35,6 +35,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/server/radmin.h>
 #include <freeradius-devel/server/request_data.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 /** Heap of all lists/modules used to get a common index with module_thread_inst_list
  *
@@ -342,16 +343,10 @@ int module_submodule_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent,
 
 	if (unlikely(module_conf_parse(mi, submodule_cs) < 0)) {
 		cf_log_err(submodule_cs, "Failed parsing submodule config");
-	error:
 		talloc_free(mi);
 		return -1;
 	}
 
-	if (unlikely(module_bootstrap(mi) < 0)) {
-		cf_log_err(submodule_cs, "Failed bootstrapping submodule");
-		goto error;
-
-	}
 	*((module_instance_t **)out) = mi;
 
 	return 0;
@@ -682,9 +677,11 @@ int module_instantiate(module_instance_t *instance)
 	 */
 	if (mi->state != MODULE_INSTANCE_BOOTSTRAPPED) return 0;
 
-	if (fr_command_register_hook(NULL, mi->name, mi, module_cmd_table) < 0) {
-		PERROR("Failed registering radmin commands for module %s", mi->name);
-		return -1;
+	if (mi->dl_inst->module->type == DL_MODULE_TYPE_MODULE) {
+		if (fr_command_register_hook(NULL, mi->name, mi, module_cmd_table) < 0) {
+			PERROR("Failed registering radmin commands for module %s", mi->name);
+			return -1;
+		}
 	}
 
 	/*
@@ -821,6 +818,7 @@ int modules_bootstrap(module_list_t const *ml)
  *
  * @param[in] ctx		Where to allocate the module name.
  * @param[out] out		Where to write a pointer to the instance name.
+ * @param[in] ml		Module list in which to find the parent.
  * @param[in] parent		of the module.
  * @param[in] inst_name		module's instance name.
  */
@@ -888,12 +886,12 @@ static int _module_instance_free(module_instance_t *mi)
 	 *	Remove all xlat's registered to module instance.
 	 */
 	if (mi->dl_inst && mi->dl_inst->data) {
-		xlat_unregister(mi->name);
+		xlat_func_unregister(mi->name);
 		/*
 		 *	Remove any registered paircmps.
 		 */
 		paircmp_unregister_instance(mi->dl_inst->data);
-		xlat_unregister_module(mi->dl_inst);
+		xlat_func_unregister_module(mi->dl_inst);
 	}
 
 	/*
@@ -1086,6 +1084,7 @@ static int _module_list_free(module_list_t *ml)
  * If no more instances of the module exist the module be unloaded.
  *
  * @param[in] ctx	To allocate the list in.
+ * @param[in] name	of the list.
  * @return A new module list.
  */
 module_list_t *module_list_alloc(TALLOC_CTX *ctx, char const *name)

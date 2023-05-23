@@ -113,6 +113,17 @@ server tacacs {
 #				max = 4096
 
 				#
+				#  max_rounds: The maximum number of round trips which are allowed
+				#
+				#  This is only enforced for `Authentication-Type = ASCII`, when
+				#  the server replies with `GetUser` or `GetPass` or `GetData`.
+				#
+				#  Some broken clients will send packets in a loop, forever.
+				#  This configuration helps to catch and prevent that.
+				#
+				max_rounds = 4
+
+				#
 				#  timeout:: How long to wait before expiring a
 				#  session.
 				#
@@ -199,6 +210,71 @@ server tacacs {
 			#
 #			src_ipaddr = ""
 		}
+
+		#
+		#  limit:: limits for this socket.
+		#
+		#  The `limit` section contains configuration items
+		#  which enforce various limits on the socket.  These
+		#  limits are usually transport-specific.
+		#
+		#  Limits are used to prevent "run-away" problems.
+		#
+		limit {
+			#
+			#  max_connections:: The maximum number of
+			#  connected sockets which will be accepted
+			#  for this listener.
+			#
+			#  Each connection opens a new socket, so be
+			#  aware of system file descriptor
+			#  limitations.
+			#
+			#  If the listeners do not use connected
+			#  sockets (e.g. TCP), then this configuration
+			#  item is ignored.
+			#
+			max_connections = 256
+
+			#
+			#  idle_timeout:: Time after which idle
+			#  connections are deleted.
+			#
+			#  Useful range of values: 5 to 600
+			#
+			idle_timeout = 60.0
+		}
+	}
+
+	#
+	#  ## Clients
+	#
+	#  A virtual server can have multiple `client` definitions.  These clients take priority
+	#  over  the global `client` definitions.
+	#
+	#  See the main `clients.conf` file for documentation on the `client` section.
+	#
+	client tacacs {
+		ipaddr = 127.0.0.1
+
+		#
+		#  This has to be specified for all TACACS+ clients.
+		#
+		#  There is no standard for TACACS+ over UDP.
+		#
+		proto = tcp
+
+		#
+		#  The TACACS+ key, or secret.  If a secret is defined, then
+		#  it will be used.  All packets coming from this client MUST be
+		#  encrypted with the shared secret.
+		#
+		#  The `secret` configuration item can be omitted or deleted,
+		#  in which case all of the information (including passwords)
+		#  are sent over the network in the clear.  This practice is
+		#  not recommended.
+		#
+		secret = testing123
 	}
 
 	#
@@ -208,13 +284,17 @@ server tacacs {
 	#
 	#  ### Recv
 	#
- 	recv Authentication-Start {
+	recv Authentication-Start {
 		-sql
 
 		#
-		#  Set _our_ authentication method to the _requested_ one.
+		#  In general, it is not necessary to set `Auth-Type` here.  The packet header
+		#  contains a TACACS `Authentication-Type` with value `PAP`, `CHAP`, etc.  That value will
+		#  be used automatically.
 		#
-		&control.Auth-Type := &Authentication-Type
+		#  The only reason to set `Auth-Type` here is when you want to use a custom
+		#  authentication method, such as `ldap`.
+		#
 	}
 
 	authenticate PAP {
@@ -243,11 +323,11 @@ server tacacs {
 	#
 	#  ### Send
 	#
-	send Authentication-Reply-Success {
+	send Authentication-Pass {
 		&reply.Server-Message := "Hello %{User-Name}"
 	}
 
-	send Authentication-Reply-Fail {
+	send Authentication-Fail {
 		&reply.Server-Message := "Failed login!"
 	}
 
@@ -290,7 +370,7 @@ server tacacs {
 	#
 	#	### Send
 	#
-	send Authorization-Reply {
+	send Authorization-Pass-Add {
 		&reply.Authorization-Status := Pass-Add
 		&reply.Server-Message := "authorization-response-server"
 		&reply.Data := "authorization-response-data"
@@ -330,10 +410,12 @@ server tacacs {
 	#
 	#	### Send
 	#
-	send Accounting-Reply-Success {
-		&reply.Accounting-Status := Success
+	send Accounting-Success {
 		&reply.Server-Message := "Success"
-		&reply.Data := 0x00
+	}
+
+	send Accounting-Error {
+		&reply.Server-Message := "Error"
 	}
 
 	#

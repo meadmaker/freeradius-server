@@ -17,7 +17,7 @@
 /**
  * $Id$
  *
- * @file proto_control/radmin.c
+ * @file src/listen/control/radmin.c
  * @brief Control a running radiusd process.
  *
  * @copyright 2012-2016 The FreeRADIUS server project
@@ -202,7 +202,7 @@ static int client_socket(char const *server)
 		fr_exit_now(EXIT_FAILURE);
 	}
 
-	fd = fr_socket_client_tcp(NULL, &ipaddr, port, false);
+	fd = fr_socket_client_tcp(NULL, NULL, &ipaddr, port, false);
 	if (fd < 0) {
 		fprintf(stderr, "%s: Failed opening socket %s: %s\n",
 			progname, server, fr_syserror(errno));

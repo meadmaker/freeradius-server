@@ -30,6 +30,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/server/tmpl.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 /*
  *	Define a structure for our module configuration.
@@ -282,7 +283,7 @@ static unlang_action_t CC_HINT(nonnull) mod_return(rlm_rcode_t *p_result, UNUSED
 	RETURN_MODULE_OK;
 }
 
-static void mod_retry_signal(module_ctx_t const *mctx, request_t *request, fr_state_signal_t action);
+static void mod_retry_signal(module_ctx_t const *mctx, request_t *request, fr_signal_t action);
 
 /** Continue after marked runnable
  *
@@ -301,7 +302,7 @@ static unlang_action_t mod_retry_resume_retry(UNUSED rlm_rcode_t *p_result, UNUS
 {
 	RDEBUG("Test retry");
 
-	return unlang_module_yield(request, mod_retry_resume, mod_retry_signal, NULL);
+	return unlang_module_yield(request, mod_retry_resume, mod_retry_signal, 0, NULL);
 }
 
 /** Continue after FR_SIGNAL_TIMEOUT
@@ -314,7 +315,7 @@ static unlang_action_t mod_retry_resume_timeout(rlm_rcode_t *p_result, UNUSED mo
 	RETURN_MODULE_OK;
 }
 
-static void mod_retry_signal(UNUSED module_ctx_t const *mctx, request_t *request, fr_state_signal_t action)
+static void mod_retry_signal(UNUSED module_ctx_t const *mctx, request_t *request, fr_signal_t action)
 {
 	switch (action) {
 	case FR_SIGNAL_RETRY:
@@ -343,7 +344,7 @@ static void mod_retry_signal(UNUSED module_ctx_t const *mctx, request_t *request
  */
 static unlang_action_t CC_HINT(nonnull) mod_retry(UNUSED rlm_rcode_t *p_result, UNUSED module_ctx_t const *mctx, request_t *request)
 {
-	return unlang_module_yield(request, mod_retry_resume, mod_retry_signal, NULL);
+	return unlang_module_yield(request, mod_retry_resume, mod_retry_signal, 0, NULL);
 }
 
 
@@ -358,7 +359,7 @@ static xlat_arg_parser_t const trigger_test_xlat_args[] = {
  */
 static xlat_action_t trigger_test_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				       UNUSED xlat_ctx_t const *xctx, request_t *request,
-				       FR_DLIST_HEAD(fr_value_box_list) *in)
+				       fr_value_box_list_t *in)
 {
 	fr_value_box_t	*in_head = fr_value_box_list_head(in);
 	fr_value_box_t	*vb;
@@ -379,7 +380,8 @@ static xlat_action_t trigger_test_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 
 static xlat_arg_parser_t const test_xlat_args[] = {
-	{ .required = true, .concat = true, .variadic = true, .type = FR_TYPE_STRING },
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	{ .variadic = XLAT_ARG_VARIADIC_EMPTY_KEEP, .concat = true, .type = FR_TYPE_STRING },
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -390,12 +392,11 @@ static xlat_arg_parser_t const test_xlat_args[] = {
  */
 static xlat_action_t test_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			       UNUSED xlat_ctx_t const *xctx, UNUSED request_t *request,
-			       FR_DLIST_HEAD(fr_value_box_list) *in)
+			       fr_value_box_list_t *in)
 {
-	fr_value_box_t	*vb_p = NULL;
 	fr_value_box_t	*vb;
 
-	while ((vb_p = fr_value_box_list_next(in, vb_p))) {
+	fr_value_box_list_foreach(in, vb_p) {
 		MEM(vb = fr_value_box_alloc(ctx, FR_TYPE_STRING, NULL, false));
 
 		if (fr_value_box_copy(ctx, vb, vb_p) < 0) {
@@ -482,19 +483,25 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		INFO("inst->tmpl_m is NULL");
 	}
 
-	if (!cf_section_name2(mctx->inst->conf)) {
-		if (!(xlat = xlat_register_module(inst, mctx, "test_trigger", trigger_test_xlat, FR_TYPE_BOOL, NULL))) return -1;
-		xlat_func_args(xlat, trigger_test_xlat_args);
-
-		if (!(xlat = xlat_register_module(inst, mctx, "test", test_xlat, FR_TYPE_STRING, NULL))) return -1;
-		xlat_func_args(xlat, test_xlat_args);
-
-	} else {
-		if (!(xlat = xlat_register_module(inst, mctx, mctx->inst->name, test_xlat, FR_TYPE_VOID, NULL))) return -1;
-		xlat_func_args(xlat, test_xlat_args);
-	}
+	if (!(xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, test_xlat, FR_TYPE_VOID))) return -1;
+	xlat_func_args_set(xlat, test_xlat_args);
 
 	return 0;
+}
+
+static int mod_load(void)
+{
+	xlat_t	*xlat;
+
+	if (!(xlat = xlat_func_register(NULL, "test_trigger", trigger_test_xlat, FR_TYPE_BOOL))) return -1;
+	xlat_func_args_set(xlat, trigger_test_xlat_args);
+
+	return 0;
+}
+
+static void mod_unload(void)
+{
+	xlat_func_unregister("test_trigger");
 }
 
 /*
@@ -516,6 +523,8 @@ module_rlm_t rlm_test = {
 		.thread_inst_size	= sizeof(rlm_test_thread_t),
 		.config			= module_config,
 		.bootstrap		= mod_bootstrap,
+		.onload			= mod_load,
+		.unload			= mod_unload,
 		.thread_instantiate	= mod_thread_instantiate,
 		.thread_detach		= mod_thread_detach
 	},

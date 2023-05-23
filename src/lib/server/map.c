@@ -128,10 +128,7 @@ int map_afrom_cp(TALLOC_CTX *ctx, map_t **out, map_t *parent, CONF_PAIR *cp,
 	/*
 	 *	Allow for the RHS rules to be taken from the LHS rules.
 	 */
-	if (!rhs_rules) {
-		rhs_rules = lhs_rules;
-		fr_assert(lhs_rules->attr.list_as_attr); /* so we don't worry about list_def? */
-	}
+	if (!rhs_rules) rhs_rules = lhs_rules;
 
 	MEM(child_ctx = talloc(map, uint8_t));
 
@@ -181,7 +178,7 @@ int map_afrom_cp(TALLOC_CTX *ctx, map_t **out, map_t *parent, CONF_PAIR *cp,
 		 *	parsed in the context of the LHS, but only if
 		 *	the LHS attribute was a group / structural attribute.
 		 */
-		if (!input_rhs_rules && lhs_rules->attr.list_as_attr) {
+		if (!input_rhs_rules) {
 			tmpl_rules_child_init(child_ctx, &my_rhs_rules, lhs_rules, map->lhs);
 			rhs_rules = &my_rhs_rules;
 		}
@@ -473,7 +470,7 @@ ssize_t map_afrom_substr(TALLOC_CTX *ctx, map_t **out, map_t **parent_p, fr_sbuf
 			 */
 			if (is_child) {
 				fr_assert(tmpl_is_attr(parent->lhs));
-				our_lhs_rules.attr.parent = tmpl_attr_tail_da(parent->lhs);
+				our_lhs_rules.attr.namespace = tmpl_attr_tail_da(parent->lhs);
 
 				slen = tmpl_afrom_attr_substr(map, NULL, &map->lhs, &our_in,
 							      &map_parse_rules_bareword_quoted, &our_lhs_rules);
@@ -728,6 +725,8 @@ static int _map_afrom_cs(TALLOC_CTX *ctx, map_list_t *out, map_t *parent, CONF_S
 
 	tmpl_rules_t	our_lhs_rules = *lhs_rules;	/* Mutable copy of the destination */
 	TALLOC_CTX	*tmp_ctx = NULL;		/* Temporary context for request lists */
+	tmpl_rules_t	child_rhs_rules = *rhs_rules;
+	tmpl_rules_t const  *our_rhs_rules;
 
 	/*
 	 *	The first map has ctx as the parent context.
@@ -750,7 +749,7 @@ static int _map_afrom_cs(TALLOC_CTX *ctx, map_list_t *out, map_t *parent, CONF_S
 		MEM(tmp_ctx = talloc_init_const("tmp"));
 
 		slen = tmpl_request_ref_list_afrom_substr(ctx, NULL, &our_lhs_rules.attr.request_def,
-							  &FR_SBUFF_IN(p, strlen(p)), NULL, NULL);
+							  &FR_SBUFF_IN(p, strlen(p)));
 		if (slen < 0) {
 			cf_log_err(ci, "Default request specified in mapping section is invalid");
 			talloc_free(tmp_ctx);
@@ -758,8 +757,8 @@ static int _map_afrom_cs(TALLOC_CTX *ctx, map_list_t *out, map_t *parent, CONF_S
 		}
 		p += slen;
 
-		our_lhs_rules.attr.list_def = fr_table_value_by_str(pair_list_table, p, PAIR_LIST_UNKNOWN);
-		if (our_lhs_rules.attr.list_def == PAIR_LIST_UNKNOWN) {
+		slen = tmpl_attr_list_from_substr(&our_lhs_rules.attr.list_def, &FR_SBUFF_IN(p, strlen(p)));
+		if (slen == 0) {
 			cf_log_err(ci, "Default list \"%s\" specified in mapping section is invalid", p);
 			talloc_free(tmp_ctx);
 			return -1;
@@ -770,6 +769,13 @@ do_children:
 	for (ci = cf_item_next(cs, NULL);
 	     ci != NULL;
 	     ci = cf_item_next(cs, ci)) {
+		tmpl_rules_t	child_lhs_rules = our_lhs_rules;
+
+		/*
+		 *	Disallow list references on the LHS of child lists for edit sections.
+		 */
+		if (edit) child_lhs_rules.attr.list_presence = TMPL_ATTR_LIST_FORBID;
+
 		if (total++ == max) {
 			cf_log_err(ci, "Map size exceeded");
 		error:
@@ -790,7 +796,6 @@ do_children:
 			CONF_SECTION	*subcs;
 			fr_token_t	token;
 			ssize_t		slen;
-			bool		qualifiers = our_lhs_rules.attr.disallow_qualifiers;
 			map_list_t	child_list;
 
 			map_list_init(&child_list);
@@ -844,35 +849,34 @@ do_children:
 			}
 
 			/*
-			 *	Disallow list qualifiers for the child
-			 *	templates.  The syntax requires that
-			 *	the child attributes go into the
-			 *	parent one.
-			 */
-			our_lhs_rules.attr.disallow_qualifiers = true;
-
-			/*
 			 *	The leaf reference of the outer section
 			 *	is used as the parsing context of the
 			 *	inner section.
 			 */
-			our_lhs_rules.attr.prefix = TMPL_ATTR_REF_PREFIX_NO;
-			our_lhs_rules.attr.parent = tmpl_attr_tail_da(map->lhs);
+			child_lhs_rules.attr.prefix = TMPL_ATTR_REF_PREFIX_AUTO;
+			child_lhs_rules.attr.namespace = tmpl_attr_tail_da(map->lhs);
 
 			/*
 			 *	Groups MAY change dictionaries.  If so, then swap the dictionary and the parent.
 			 */
-			if (our_lhs_rules.attr.parent->type == FR_TYPE_GROUP) {
+			if (child_lhs_rules.attr.namespace->type == FR_TYPE_GROUP) {
 				fr_dict_attr_t const *ref;
 				fr_dict_t const *dict, *internal;
 
-				ref = fr_dict_attr_ref(our_lhs_rules.attr.parent);
+				ref = fr_dict_attr_ref(child_lhs_rules.attr.namespace);
 				dict = fr_dict_by_da(ref);
 				internal = fr_dict_internal();
 
-				if ((dict != internal) && (dict != our_lhs_rules.attr.dict_def)) {
-					our_lhs_rules.attr.dict_def = dict;
-					our_lhs_rules.attr.parent = ref;
+				if (dict != internal) {
+					if (dict != child_lhs_rules.attr.dict_def) {
+						child_lhs_rules.attr.dict_def = dict;
+						child_lhs_rules.attr.namespace = ref;
+					}
+				} else {
+					/*
+					 *	We're internal: don't use it, and instead rely on dict_def.
+					 */
+					child_lhs_rules.attr.namespace = NULL;
 				}
 			}
 
@@ -887,14 +891,13 @@ do_children:
 			 *	correct parent map.
 			 */
 			if (_map_afrom_cs(map, &child_list, map, cf_item_to_section(ci),
-					 &our_lhs_rules, rhs_rules, validate, uctx, max, false, edit) < 0) {
+					 &child_lhs_rules, rhs_rules, validate, uctx, max, false, edit) < 0) {
 				map_list_talloc_free(&child_list);
 				talloc_free(map);
 				goto error;
 			}
 			map_list_move(&map->child, &child_list);
 
-			our_lhs_rules.attr.disallow_qualifiers = qualifiers;
 			MAP_VERIFY(map);
 			goto next;
 		}
@@ -907,7 +910,33 @@ do_children:
 		cp = cf_item_to_pair(ci);
 		fr_assert(cp != NULL);
 
-		if (map_afrom_cp(parent_ctx, &map, parent, cp, &our_lhs_rules, rhs_rules, edit) < 0) {
+		/*
+		 *	Over-ride RHS rules for
+		 *
+		 *	&reply += {
+		 *		&User-Name = &User-Name
+		 *	}
+		 *
+		 *	Which looks stupid.  Instead we require
+		 *
+		 *	&reply += {
+		 *		&User-Name = &request.User-Name
+		 *	}
+		 *
+		 *	On the other hand, any xlats on the RHS don't use the full path.  :( And we still need
+		 *	to allow relative attribute references via "&.foo", when updating structures.
+		 */
+		our_rhs_rules = rhs_rules;
+		if (edit && (rhs_rules->attr.list_def != child_lhs_rules.attr.list_def)) {
+			char const *value = cf_pair_value(cp);
+
+			if (value && (*value == '&')) {
+				child_rhs_rules.attr.list_presence = TMPL_ATTR_LIST_REQUIRE;
+				our_rhs_rules = &child_rhs_rules;
+			}
+		}
+
+		if (map_afrom_cp(parent_ctx, &map, parent, cp, &child_lhs_rules, our_rhs_rules, edit) < 0) {
 			cf_log_err(ci, "Failed creating map from '%s = %s'",
 				   cf_pair_attr(cp), cf_pair_value(cp));
 			goto error;
@@ -1341,7 +1370,7 @@ int map_afrom_vp(TALLOC_CTX *ctx, map_t **out, fr_pair_t *vp, tmpl_rules_t const
  * @param[in,out] ctx to allocate new #fr_pair_t (s) in.
  * @param[out] out Where to write the #fr_pair_t (s).
  * @param[in] request structure (used only for talloc).
- * @param[in] map the map. The LHS (dst) must be #TMPL_TYPE_ATTR or #TMPL_TYPE_LIST.
+ * @param[in] map the map. The LHS (dst) must be #TMPL_TYPE_ATTR.
  *	The RHS (src) must be #TMPL_TYPE_EXEC.
  * @return
  *	- 0 on success.
@@ -1362,12 +1391,12 @@ static int map_exec_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reque
 
 	fr_assert(map->rhs);		/* Quite clang scan */
 	fr_assert(tmpl_is_exec(map->rhs));
-	fr_assert(tmpl_is_attr(map->lhs) || tmpl_is_list(map->lhs));
+	fr_assert(tmpl_is_attr(map->lhs));
 
 	/*
 	 *	We always put the request pairs into the environment
 	 */
-	input_pairs = tmpl_list_head(request, PAIR_LIST_REQUEST);
+	input_pairs = tmpl_list_head(request, request_attr_request);
 
 	/*
 	 *	Automagically switch output type depending on our destination
@@ -1375,8 +1404,7 @@ static int map_exec_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reque
 	 *	if dst is an attribute, then we create an attribute of that type and then
 	 *	call fr_pair_value_from_str on the output of the script.
 	 */
-	result = radius_exec_program_legacy(ctx, answer, sizeof(answer),
-				     tmpl_is_list(map->lhs) ? &output_pairs : NULL,
+	result = radius_exec_program_legacy(ctx, answer, sizeof(answer), NULL,
 				     request, map->rhs->name, input_pairs ? input_pairs : NULL,
 				     true, true, fr_time_delta_from_sec(EXEC_TIMEOUT));
 	talloc_free(expanded);
@@ -1387,14 +1415,6 @@ static int map_exec_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reque
 	}
 
 	switch (map->lhs->type) {
-	case TMPL_TYPE_LIST:
-		if (fr_pair_list_empty(&output_pairs)) {
-			REDEBUG("No valid attributes received from program");
-			return -2;
-		}
-		fr_pair_list_append(out, &output_pairs);
-		return 0;
-
 	case TMPL_TYPE_ATTR:
 	{
 		fr_pair_t *vp;
@@ -1422,7 +1442,7 @@ static int map_exec_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reque
  * @param[in,out] ctx to allocate #fr_pair_t (s) in.
  * @param[out] out Where to write the #fr_pair_t (s), which may be NULL if not found
  * @param[in] request The current request.
- * @param[in] map the map. The LHS (dst) has to be #TMPL_TYPE_ATTR or #TMPL_TYPE_LIST.
+ * @param[in] map the map. The LHS (dst) has to be #TMPL_TYPE_ATTR.
  * @param[in] uctx unused.
  * @return
  *	- 0 on success.
@@ -1443,7 +1463,7 @@ int map_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *request, map_t co
 	MAP_VERIFY(map);
 	if (!fr_cond_assert(map->lhs != NULL)) return -1;
 
-	fr_assert(tmpl_is_list(map->lhs) || tmpl_is_attr(map->lhs));
+	fr_assert(tmpl_is_attr(map->lhs));
 
 	/*
 	 *	Special case for !*, we don't need to parse RHS as this is a unary operator.
@@ -1513,7 +1533,8 @@ int map_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *request, map_t co
 	 *	to allocate any attributes, just finding the current list, and change
 	 *	the op.
 	 */
-	if (tmpl_is_list(map->lhs) && tmpl_is_list(map->rhs)) {
+	if ((tmpl_contains_attr(map->lhs) && tmpl_attr_tail_da_is_structural(map->lhs)) &&
+	    (tmpl_contains_attr(map->rhs) && tmpl_attr_tail_da_is_structural(map->rhs))) {
 		fr_pair_list_t *from = NULL;
 
 		if (tmpl_request_ptr(&context, tmpl_request(map->rhs)) == 0) {
@@ -1596,8 +1617,7 @@ int map_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *request, map_t co
 		fr_pair_t *vp;
 		fr_dcursor_t from;
 
-		fr_assert((tmpl_is_attr(map->lhs) && tmpl_attr_tail_da(map->lhs)) ||
-			   (tmpl_is_list(map->lhs) && !tmpl_attr_tail_da(map->lhs)));
+		fr_assert(tmpl_is_attr(map->lhs) && tmpl_attr_tail_da(map->lhs));
 
 		/*
 		 * @todo should log error, and return -1 for v3.1 (causes update to fail)
@@ -1610,7 +1630,7 @@ int map_to_vp(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *request, map_t co
 		 *  Src/Dst attributes don't match, convert src attributes
 		 *  to match dst.
 		 */
-		if (tmpl_is_attr(map->lhs) &&
+		if (tmpl_is_attr(map->lhs) && tmpl_attr_tail_da_is_leaf(map->lhs) &&
 		    (tmpl_attr_tail_da(map->rhs)->type != tmpl_attr_tail_da(map->lhs)->type)) {
 			for (; vp; vp = fr_dcursor_current(&from)) {
 				MEM(n = fr_pair_afrom_da(ctx, tmpl_attr_tail_da(map->lhs)));
@@ -1735,7 +1755,7 @@ int map_to_request(request_t *request, map_t const *map, radius_map_getvalue_t f
 
 	map_t			exp_map;
 	tmpl_t			*exp_lhs;
-	tmpl_pair_list_t	list_ref;
+	fr_dict_attr_t const	*list_ref;
 
 	tmpl_dcursor_ctx_t	cc = {};
 
@@ -1753,7 +1773,6 @@ int map_to_request(request_t *request, map_t const *map, radius_map_getvalue_t f
 	/*
 	 *	Already in the correct form.
 	 */
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_ATTR:
 		break;
 
@@ -1781,6 +1800,7 @@ int map_to_request(request_t *request, map_t const *map, radius_map_getvalue_t f
 					   &(tmpl_rules_t){
 					   	.attr = {
 					   		.dict_def = request->dict,
+							.list_def = request_attr_request,
 				   			.prefix = TMPL_ATTR_REF_PREFIX_NO
 				   		}
 					   });
@@ -1790,7 +1810,7 @@ int map_to_request(request_t *request, map_t const *map, radius_map_getvalue_t f
 			rcode = -1;
 			goto finish;
 		}
-		fr_assert(tmpl_is_attr(exp_lhs) || tmpl_is_list(exp_lhs));
+		fr_assert(tmpl_is_attr(exp_lhs));
 
 		memcpy(&exp_map, map, sizeof(exp_map));
 		exp_map.lhs = exp_lhs;
@@ -1808,8 +1828,7 @@ int map_to_request(request_t *request, map_t const *map, radius_map_getvalue_t f
 	 *	Sanity check inputs.  We can have a list or attribute
 	 *	as a destination.
 	 */
-	if (!tmpl_is_list(map->lhs) &&
-	    !tmpl_is_attr(map->lhs)) {
+	if (!tmpl_is_attr(map->lhs)) {
 		REDEBUG("Left side \"%.*s\" of map should be an attr or list but is an %s",
 			(int)map->lhs->len, map->lhs->name,
 			tmpl_type_to_str(map->lhs->type));
@@ -1830,7 +1849,7 @@ int map_to_request(request_t *request, map_t const *map, radius_map_getvalue_t f
 	if (!list) {
 		REDEBUG("Mapping \"%.*s\" -> \"%.*s\" cannot be performed due to to invalid list qualifier \"%s\" in left side of map",
 			(int)map->rhs->len, map->rhs->name, (int)map->lhs->len, map->lhs->name,
-			fr_table_str_by_value(pair_list_table, list_ref, "<INVALID>"));
+			tmpl_list_name(list_ref, "<INVALID>"));
 		rcode = -2;
 		goto finish;
 	}
@@ -2322,49 +2341,6 @@ void map_debug_log(request_t *request, map_t const *map, fr_pair_t const *vp)
 		fr_pair_aprint_value_quoted(request, &rhs, vp, map->rhs->quote);
 		break;
 
-	/*
-	 *	For the lists, we can't use the original name, and have to
-	 *	rebuild it using tmpl_print, for each attribute we're
-	 *	copying.
-	 */
-	case TMPL_TYPE_LIST:
-	{
-		tmpl_t		*vpt;
-		fr_token_t	quote;
-
-		switch (vp->vp_type) {
-		case FR_TYPE_QUOTED:
-			quote = T_DOUBLE_QUOTED_STRING;
-			break;
-		default:
-			quote = T_BARE_WORD;
-			break;
-		}
-
-		vpt = tmpl_alloc(request, TMPL_TYPE_ATTR, quote, map->rhs->name, strlen(map->rhs->name));
-
-		/*
-		 *	Fudge a temporary tmpl that describes the attribute we're copying
-		 *	this is a combination of the original list tmpl, and values from
-		 *	the fr_pair_t.
-		 */
-		tmpl_attr_copy(vpt, map->rhs);
-		tmpl_attr_set_leaf_da(vpt, vp->da);
-		tmpl_attr_set_leaf_num(vpt, NUM_UNSPEC);
-
-		/*
-		 *	Not appropriate to use map->rhs->quote here, as that's the quoting
-		 *	around the list ref. The attribute value has no quoting, so we choose
-		 *	the quoting based on the data type.
-		 */
-		fr_pair_aprint_value_quoted(request, &value, vp, quote);
-		tmpl_print(&FR_SBUFF_OUT(buffer, sizeof(buffer)), vpt, TMPL_ATTR_REF_PREFIX_YES, NULL);
-		rhs = talloc_typed_asprintf(request, "%s -> %s", buffer, value);
-
-		talloc_free(vpt);
-	}
-		break;
-
 	case TMPL_TYPE_ATTR:
 	{
 		fr_token_t	quote;
@@ -2395,19 +2371,6 @@ void map_debug_log(request_t *request, map_t const *map, fr_pair_t const *vp)
 	}
 
 	switch (map->lhs->type) {
-	case TMPL_TYPE_LIST:
-		/*
-		 *	The MAP may have said "list", but if there's a
-		 *	VP, it has it's own name, which isn't in the
-		 *	map name.
-		 */
-		if (vp) {
-			tmpl_print(&FR_SBUFF_OUT(buffer, sizeof(buffer)), map->lhs, TMPL_ATTR_REF_PREFIX_YES, NULL);	/* Fixme - bad escaping */
-			RDEBUG2("%s%s %s %s", buffer, vp->da->name, fr_table_str_by_value(fr_tokens_table, vp->op, "<INVALID>"), rhs);
-			break;
-		}
-		FALL_THROUGH;
-
 	case TMPL_TYPE_ATTR:
 		tmpl_print(&FR_SBUFF_OUT(buffer, sizeof(buffer)), map->lhs, TMPL_ATTR_REF_PREFIX_YES, NULL);
 		RDEBUG2("%s %s %s", buffer, fr_table_str_by_value(fr_tokens_table, vp ? vp->op : map->op, "<INVALID>"), rhs);

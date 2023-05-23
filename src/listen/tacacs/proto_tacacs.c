@@ -36,6 +36,20 @@ extern fr_app_t proto_tacacs;
 static int type_parse(TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM *ci, UNUSED CONF_PARSER const *rule);
 static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF_ITEM *ci, CONF_PARSER const *rule);
 
+static CONF_PARSER const limit_config[] = {
+	{ FR_CONF_OFFSET("idle_timeout", FR_TYPE_TIME_DELTA, proto_tacacs_t, io.idle_timeout), .dflt = "30.0" } ,
+
+	{ FR_CONF_OFFSET("max_connections", FR_TYPE_UINT32, proto_tacacs_t, io.max_connections), .dflt = "1024" } ,
+
+	/*
+	 *	For performance tweaking.  NOT for normal humans.
+	 */
+	{ FR_CONF_OFFSET("max_packet_size", FR_TYPE_UINT32, proto_tacacs_t, max_packet_size) } ,
+	{ FR_CONF_OFFSET("num_messages", FR_TYPE_UINT32, proto_tacacs_t, num_messages) } ,
+
+	CONF_PARSER_TERMINATOR
+};
+
 static const CONF_PARSER priority_config[] = {
 	{ FR_CONF_OFFSET("Authentication-Start", FR_TYPE_VOID, proto_tacacs_t, priorities[FR_TAC_PLUS_AUTHEN]),
 	  .func = cf_table_parse_int, .uctx = &(cf_table_parse_ctx_t){ .table = channel_packet_priority, .len = &channel_packet_priority_len }, .dflt = "high" },
@@ -54,8 +68,9 @@ static const CONF_PARSER proto_tacacs_config[] = {
 	  .func = type_parse },
 	{ FR_CONF_OFFSET("transport", FR_TYPE_VOID, proto_tacacs_t, io.submodule),
 	  .func = transport_parse },
-	{ FR_CONF_POINTER("priority", FR_TYPE_SUBSECTION, NULL),
-	  .subcs = (void const *) priority_config },
+
+	{ FR_CONF_POINTER("limit", FR_TYPE_SUBSECTION, NULL), .subcs = (void const *) limit_config },
+	{ FR_CONF_POINTER("priority", FR_TYPE_SUBSECTION, NULL), .subcs = (void const *) priority_config },
 
 	CONF_PARSER_TERMINATOR
 };
@@ -117,7 +132,7 @@ static int type_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent, CONF_ITEM
 
 /** Wrapper around dl_instance
  *
- * @param[in] ctx	to allocate data in (instance of proto_radius).
+ * @param[in] ctx	to allocate data in (instance of proto_tacacs).
  * @param[out] out	Where to write a dl_module_inst_t containing the module handle and instance.
  * @param[in] parent	Base structure address.
  * @param[in] ci	#CONF_PAIR specifying the name of the type module.
@@ -170,14 +185,16 @@ static int transport_parse(TALLOC_CTX *ctx, void *out, UNUSED void *parent, CONF
 /** Decode the packet
  *
  */
-static int mod_decode(void const *instance, request_t *request, uint8_t *const data, size_t data_len)
+static int mod_decode(UNUSED void const *instance, request_t *request, uint8_t *const data, size_t data_len)
 {
-	proto_tacacs_t const	*inst = talloc_get_type_abort_const(instance, proto_tacacs_t);
 	fr_io_track_t const	*track = talloc_get_type_abort_const(request->async->packet_ctx, fr_io_track_t);
 	fr_io_address_t const  	*address = track->address;
-	RADCLIENT const		*client;
-	int			code;
+	fr_client_t const		*client;
+	int			code = -1;
 	fr_tacacs_packet_t const *pkt = (fr_tacacs_packet_t const *)data;
+	char const		*secret;
+	size_t			secretlen = 0;
+	fr_dict_attr_t const	*dv = NULL;
 
 	RHEXDUMP3(data, data_len, "proto_tacacs decode packet");
 
@@ -198,6 +215,44 @@ static int mod_decode(void const *instance, request_t *request, uint8_t *const d
 		return -1;
 	}
 
+	request->packet->id   = data[2]; // seq_no
+	request->reply->id    = data[2] + 1; // seq_no, but requests are odd, replies are even! */
+
+	request->packet->data = talloc_memdup(request->packet, data, data_len);
+	request->packet->data_len = data_len;
+
+	secret = client->secret;
+	if (secret) {
+		if (!packet_is_encrypted((fr_tacacs_packet_t const *) data)) {
+			REDEBUG("Expected to see encrypted packet, got unencrypted packet!");
+			return -1;
+		}
+		secretlen = talloc_array_length(client->secret) - 1;
+	}
+
+	/*
+	 *	See if there's a client-specific vendor in the "nas_type" field.
+	 *
+	 *	If there's no such vendor, too bad for you.
+	 */
+	if (client->nas_type) {
+		dv = fr_dict_attr_by_name(NULL, fr_dict_root(dict_tacacs), client->nas_type);
+	}
+
+	/*
+	 *	Note that we don't set a limit on max_attributes here.
+	 *	That MUST be set and checked in the underlying
+	 *	transport, via a call to ???
+	 */
+	if (fr_tacacs_decode(request->request_ctx, &request->request_pairs, dv,
+			     request->packet->data, request->packet->data_len,
+			     NULL, secret, secretlen, &code) < 0) {
+		RPEDEBUG("Failed decoding packet");
+		return -1;
+	}
+
+	request->packet->code = code;
+
 	/*
 	 *	RFC 8907 Section 3.6 says:
 	 *
@@ -208,35 +263,11 @@ static int mod_decode(void const *instance, request_t *request, uint8_t *const d
 	 *	This is substantially retarded.  It should instead just close the connection.
 	 */
 
-	code = fr_tacacs_packet_to_code(pkt);
-	if (code < 0) {
-		RPEDEBUG("Invalid packet");
-		return -1;
-	}
-
-	request->packet->code = code;
-	request->packet->id   = data[2]; // seq_no
-	request->reply->id    = data[2]; // seq_no
-
-	request->packet->data = talloc_memdup(request->packet, data, data_len);
-	request->packet->data_len = data_len;
-
-	/*
-	 *	Note that we don't set a limit on max_attributes here.
-	 *	That MUST be set and checked in the underlying
-	 *	transport, via a call to ???
-	 */
-	if (fr_tacacs_decode(request->request_ctx, &request->request_pairs,
-			     request->packet->data, request->packet->data_len,
-			     NULL, client->secret, talloc_array_length(client->secret) - 1) < 0) {
-		RPEDEBUG("Failed decoding packet");
-		return -1;
-	}
 
 	/*
 	 *	Set the rest of the fields.
 	 */
-	request->client = UNCONST(RADCLIENT *, client);
+	request->client = UNCONST(fr_client_t *, client);
 
 	request->packet->socket = address->socket;
 	fr_socket_addr_swap(&request->reply->socket, &address->socket);
@@ -311,21 +342,17 @@ static int mod_decode(void const *instance, request_t *request, uint8_t *const d
 		}
 	}
 
-	if (!inst->io.app_io->decode) return 0;
-
-	/*
-	 *	Let the app_io do anything it needs to do.
-	 */
-	return inst->io.app_io->decode(inst->io.app_io_instance, request, data, data_len);
+	return 0;
 }
 
-static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buffer, size_t buffer_len)
+static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8_t *buffer, size_t buffer_len)
 {
-	proto_tacacs_t const	*inst = talloc_get_type_abort_const(instance, proto_tacacs_t);
 	fr_io_track_t 		*track = talloc_get_type_abort(request->async->packet_ctx, fr_io_track_t);
 	fr_io_address_t const  	*address = track->address;
 	ssize_t			data_len;
-	RADCLIENT const		*client;
+	fr_client_t const		*client;
+	char const		*secret;
+	size_t			secretlen = 0;
 
 	/*
 	 *	@todo - RFC 8907 Section 4.4. says:
@@ -362,7 +389,7 @@ static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buf
 	 *	Dynamic client stuff
 	 */
 	if (client->dynamic && !client->active) {
-		RADCLIENT *new_client;
+		fr_client_t *new_client;
 
 		fr_assert(buffer_len >= sizeof(client));
 
@@ -387,17 +414,11 @@ static ssize_t mod_encode(void const *instance, request_t *request, uint8_t *buf
 		return sizeof(new_client);
 	}
 
-	/*
-	 *	If the app_io encodes the packet, then we don't need
-	 *	to do that.
-	 */
-	if (inst->io.app_io->encode) {
-		data_len = inst->io.app_io->encode(inst->io.app_io_instance, request, buffer, buffer_len);
-		if (data_len > 0) return data_len;
-	}
+	secret = client->secret;
+	if (secret) secretlen = talloc_array_length(client->secret) - 1;
 
 	data_len = fr_tacacs_encode(&FR_DBUFF_TMP(buffer, buffer_len), request->packet->data,
-				    client->secret, talloc_array_length(client->secret) - 1,
+				    secret, secretlen,
 				    request->reply->code, &request->reply_pairs);
 	if (data_len < 0) {
 		RPEDEBUG("Failed encoding TACACS+ reply");

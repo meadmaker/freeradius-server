@@ -26,6 +26,7 @@
 RCSID("$Id$")
 
 #include <freeradius-devel/radius/radius.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 #include "rlm_yubikey.h"
 
 #ifdef HAVE_YKCLIENT
@@ -126,8 +127,9 @@ static ssize_t modhex2hex(char const *modhex, char *hex, size_t len)
 	return i;
 }
 
-static xlat_arg_parser_t const modhex_to_hex_xlat_arg = {
-	.required = true, .concat = true, .type = FR_TYPE_STRING
+static xlat_arg_parser_t const modhex_to_hex_xlat_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	XLAT_ARG_PARSER_TERMINATOR
 };
 
 /** Xlat to convert Yubikey modhex to standard hex
@@ -141,7 +143,7 @@ static xlat_arg_parser_t const modhex_to_hex_xlat_arg = {
  */
 static xlat_action_t modhex_to_hex_xlat(UNUSED TALLOC_CTX *ctx, fr_dcursor_t * out,
 					UNUSED xlat_ctx_t const *xctx, request_t *request,
-					FR_DLIST_HEAD(fr_value_box_list) *in)
+					fr_value_box_list_t *in)
 {
 	ssize_t 	len;
 	fr_value_box_t	*arg = fr_value_box_list_pop_head(in);
@@ -163,6 +165,8 @@ static xlat_action_t modhex_to_hex_xlat(UNUSED TALLOC_CTX *ctx, fr_dcursor_t * o
 
 static int mod_load(void)
 {
+	xlat_t		*xlat;
+
 	if (fr_dict_autoload(rlm_yubikey_dict) < 0) {
 		PERROR("%s", __FUNCTION__);
 		return -1;
@@ -174,32 +178,31 @@ static int mod_load(void)
 		return -1;
 	}
 
-	return 0;
+	if (unlikely(!(xlat = xlat_func_register(NULL, "modhextohex", modhex_to_hex_xlat, FR_TYPE_STRING)))) return -1;
+	xlat_func_mono_set(xlat, modhex_to_hex_xlat_arg);
+	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
+	return 0;
 }
 
 static void mod_unload(void)
 {
+	xlat_func_unregister("modhextohex");
 	fr_dict_autofree(rlm_yubikey_dict);
 }
 
+#ifndef HAVE_YUBIKEY
 static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
 	rlm_yubikey_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_yubikey_t);
-	xlat_t		*xlat;
 
-#ifndef HAVE_YUBIKEY
 	if (inst->decrypt) {
 		cf_log_err(mctx->inst->conf, "Requires libyubikey for OTP decryption");
 		return -1;
 	}
-#endif
-
-	xlat = xlat_register_module(inst, mctx, "modhextohex", modhex_to_hex_xlat, FR_TYPE_STRING, XLAT_FLAG_PURE);
-	if (xlat) xlat_func_mono(xlat, &modhex_to_hex_xlat_arg);
-
 	return 0;
 }
+#endif
 
 /*
  *	Do any per-module initialization that is separate to each
@@ -464,7 +467,9 @@ module_rlm_t rlm_yubikey = {
 		.onload		= mod_load,
 		.unload		= mod_unload,
 		.config		= module_config,
+#ifndef HAVE_YUBIKEY
 		.bootstrap	= mod_bootstrap,
+#endif
 		.instantiate	= mod_instantiate,
 #ifdef HAVE_YKCLIENT
 		.detach		= mod_detach,

@@ -797,7 +797,7 @@ int virtual_server_cf_parse(UNUSED TALLOC_CTX *ctx, void *out, UNUSED void *pare
  *  This function walks down the registration table, compiling each
  *  named section.
  *
- * @parma[in] server	to search for sections in.
+ * @param[in] server	to search for sections in.
  * @param[in] list	of sections to compiler.
  * @param[in] rules	to apply for pass1.
  * @param[in] instance	module instance data.  The offset value in
@@ -1162,9 +1162,17 @@ int virtual_servers_thread_instantiate(TALLOC_CTX *ctx, fr_event_list_t *el)
  */
 int virtual_servers_instantiate(void)
 {
-	size_t	i, server_cnt = virtual_servers ? talloc_array_length(virtual_servers) : 0;
+	size_t	i, server_cnt;
 
-	fr_assert(virtual_servers);
+	/*
+	 *	User didn't specify any "server" sections
+	 */
+	if (unlikely(!virtual_servers)) {
+		ERROR("No virtual servers configured");
+		return -1;
+	}
+
+	server_cnt = talloc_array_length(virtual_servers);
 
 	DEBUG2("#### Instantiating listeners ####");
 
@@ -1216,10 +1224,13 @@ int virtual_servers_instantiate(void)
 		 *      the process module.
 		 */
 		if (process->compile_list) {
-			tmpl_rules_t		parse_rules;
+			tmpl_rules_t		parse_rules = {
+				.attr = {
+					.dict_def = *(process->dict),
+					.list_def = request_attr_request,
+				},
+			};
 
-			memset(&parse_rules, 0, sizeof(parse_rules));
- 			parse_rules.attr.dict_def = *(process->dict);
 			fr_assert(parse_rules.attr.dict_def != NULL);
 
 			if (virtual_server_compile_sections(server_cs, process->compile_list, &parse_rules,

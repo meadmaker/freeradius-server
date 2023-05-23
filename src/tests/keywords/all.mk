@@ -40,32 +40,49 @@ test.keywords.${1}: $(addprefix $(OUTPUT)/,${1})
 test.keywords.help: TEST_KEYWORDS_HELP += test.keywords.${1}
 
 #
+#  Create the input attrs, either from the test-specific input,
+#  or from the default input.
+#
+$(OUTPUT)/${1}: $(OUTPUT)/${1}.attrs | $(dir $(OUTPUT)/${1})
+$(OUTPUT)/${1}.attrs: | $(dir $(OUTPUT)/${1})
+
+ifneq "$(wildcard src/tests/keywords/${1}.attrs)" ""
+$(OUTPUT)/${1}.attrs: src/tests/keywords/${1}.attrs
+else
+$(OUTPUT)/${1}.attrs: src/tests/keywords/default-input.attrs
+endif
+	@cp $$< $$@
+
+#
 #  All of the "update" tests which should also be run with "-S rewrite_update=yes"
 #
 #  update-attr-ref-null		&foo := &bar, where bar doesn't exist.  Now does nothing
 #  update-error-3		is now a run-time error instead of parse error
-#  update-list-error 		is now a run-time error instead of parse error
 #  update-group-error		error is on a different line
 #  update-null-value-assign	foo := "%{...}" should be an empty string
 #  update-remove-index		used to do???, now is parse-time error
 #  update-filter		lots of errors
 #
-KEYWORD_UPDATE_TESTS := update-attr-ref-null update-error-3 update-group-error update-list-error update-null-value-assign update-remove-index update-filter 
+KEYWORD_UPDATE_TESTS := update-attr-ref-null update-error-3 update-group-error update-null-value-assign update-remove-index update-filter
 
-KEYWORD_UPDATE_REWRITE_TESTS := update-all update-array update-delete update-remove-any update-group update-hex update-remove-value update-index update-remove-list update-prepend unknown-update  update-error update-error-2 update-exec-error update-list-null-rhs update-exec
+KEYWORD_UPDATE_REWRITE_TESTS := update-all update-array update-delete update-remove-any update-group update-hex update-remove-value update-index update-list-error update-remove-list update-prepend unknown-update  update-error update-error-2 update-exec-error update-list-null-rhs update-exec
 
 #
 #  Migration support.  Some of the tests don't run under the new
 #  conditions, so we don't run them under the new conditions.
 #
 ifneq "$(findstring ${1}, paircmp if-paircmp)" ""
-$(OUTPUT)/${1}: NEW_COND=-S parse_new_conditions=no -S use_new_conditions=no
-else ifneq "$(findstring ${1}, comments update-to-edit if-regex-multivalue smash wimax unknown $(KEYWORD_UPDATE_TESTS) vendor_specific vendor_specific.raw xlat-unknown)" ""
-$(OUTPUT)/${1}: NEW_COND=-S parse_new_conditions=yes -S use_new_conditions=yes
+$(OUTPUT)/${1}: NEW_COND=-S use_new_conditions=no
+else ifneq "$(findstring ${1}, comments update-to-edit if-regex-multivalue smash wimax unknown $(KEYWORD_UPDATE_TESTS) vendor_specific vendor_specific.raw xlat-unknown update-proto update-proto-error)" ""
+$(OUTPUT)/${1}: NEW_COND=-S use_new_conditions=yes
 else ifneq "$(findstring ${1}, $(KEYWORD_UPDATE_REWRITE_TESTS))" ""
-$(OUTPUT)/${1}: NEW_COND=-S parse_new_conditions=yes -S use_new_conditions=yes -S rewrite_update=yes
+$(OUTPUT)/${1}: NEW_COND=-S use_new_conditions=yes -S rewrite_update=yes
 else
-$(OUTPUT)/${1}: NEW_COND=-S parse_new_conditions=yes -S use_new_conditions=yes -S forbid_update=yes
+$(OUTPUT)/${1}: NEW_COND=-S use_new_conditions=yes -S forbid_update=yes
+
+ifeq "${1}" "mschap"
+$(OUTPUT)/${1}: rlm_mschap.la
+endif
 endif
 
 endef
@@ -136,7 +153,6 @@ KEYWORD_LIBS	:= $(addsuffix .la,$(addprefix rlm_,$(KEYWORD_MODULES))) rlm_csv.la
 $(OUTPUT)/%: $(DIR)/% $(TEST_BIN_DIR)/unit_test_module | $(KEYWORD_RADDB) $(KEYWORD_LIBS) build.raddb rlm_test.la rlm_csv.la rlm_unpack.la
 	$(eval CMD:=KEYWORD=$(notdir $@) $(TEST_BIN)/unit_test_module $(NEW_COND) $(UNIT_TEST_KEYWORD_ARGS.$(subst -,_,$(notdir $@))) -D share/dictionary -d src/tests/keywords/ -i "$@.attrs" -f "$@.attrs" -r "$@" -xx)
 	@echo "KEYWORD-TEST $(notdir $@)"
-	${Q}cp $(if $(wildcard $<.attrs),$<.attrs,$(dir $<)/default-input.attrs) $@.attrs
 	${Q}if ! $(CMD) > "$@.log" 2>&1 || ! test -f "$@"; then \
 		if ! grep ERROR $< 2>&1 > /dev/null; then \
 			cat $@.log; \

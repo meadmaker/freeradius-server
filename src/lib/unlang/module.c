@@ -48,6 +48,7 @@ typedef struct {
 	dl_module_inst_t		*dl_inst;	//!< Module instance to pass to callbacks.
 							///< Use dl_inst->data to get instance data.
 	void				*thread;	//!< Thread specific module instance.
+	void				*env_data;	//!< Per call environment data.
 	void const			*rctx;		//!< rctx data to pass to callbacks.
 	fr_event_timer_t const		*ev;		//!< Event in this worker's event heap.
 } unlang_module_event_t;
@@ -67,7 +68,7 @@ static void unlang_event_fd_read_handler(UNUSED fr_event_list_t *el, int fd, UNU
 
 	fr_assert(ev->fd == fd);
 
-	ev->fd_read(MODULE_CTX(ev->dl_inst, ev->thread, UNCONST(void *, ev->rctx)), ev->request, fd);
+	ev->fd_read(MODULE_CTX(ev->dl_inst, ev->thread, ev->env_data, UNCONST(void *, ev->rctx)), ev->request, fd);
 }
 
 /** Frees an unlang event, removing it from the request's event loop
@@ -104,7 +105,7 @@ static void unlang_module_event_timeout_handler(UNUSED fr_event_list_t *el, fr_t
 {
 	unlang_module_event_t *ev = talloc_get_type_abort(ctx, unlang_module_event_t);
 
-	ev->timeout(MODULE_CTX(ev->dl_inst, ev->thread, UNCONST(void *, ev->rctx)), ev->request, now);
+	ev->timeout(MODULE_CTX(ev->dl_inst, ev->thread, ev->env_data, UNCONST(void *, ev->rctx)), ev->request, now);
 	talloc_free(ev);
 }
 
@@ -145,6 +146,7 @@ int unlang_module_timeout_add(request_t *request, unlang_module_timeout_t callba
 		.timeout = callback,
 		.dl_inst = mc->instance->dl_inst,
 		.thread = state->thread,
+		.env_data = state->env_data,
 		.rctx = rctx
 	};
 
@@ -193,7 +195,7 @@ static void unlang_event_fd_write_handler(UNUSED fr_event_list_t *el, int fd, UN
 	unlang_module_event_t *ev = talloc_get_type_abort(ctx, unlang_module_event_t);
 	fr_assert(ev->fd == fd);
 
-	ev->fd_write(MODULE_CTX(ev->dl_inst, ev->thread, UNCONST(void *, ev->rctx)), ev->request, fd);
+	ev->fd_write(MODULE_CTX(ev->dl_inst, ev->thread, ev->env_data, UNCONST(void *, ev->rctx)), ev->request, fd);
 }
 
 /** Call the callback registered for an I/O error event
@@ -211,7 +213,7 @@ static void unlang_event_fd_error_handler(UNUSED fr_event_list_t *el, int fd,
 
 	fr_assert(ev->fd == fd);
 
-	ev->fd_error(MODULE_CTX(ev->dl_inst, ev->thread, UNCONST(void *, ev->rctx)), ev->request, fd);
+	ev->fd_error(MODULE_CTX(ev->dl_inst, ev->thread, ev->env_data, UNCONST(void *, ev->rctx)), ev->request, fd);
 }
 
 
@@ -267,6 +269,7 @@ int unlang_module_fd_add(request_t *request,
 	ev->fd_error = error;
 	ev->dl_inst = mc->instance->dl_inst;
 	ev->thread = state->thread;
+	ev->env_data = state->env_data;
 	ev->rctx = rctx;
 
 	/*
@@ -393,7 +396,7 @@ int unlang_module_push(rlm_rcode_t *p_result, request_t *request,
  *	- <0 on error
  *	- 0 on success
  */
-int unlang_module_set_resume(request_t *request, unlang_module_resume_t resume)
+int unlang_module_set_resume(request_t *request, module_method_t resume)
 {
 	unlang_stack_t			*stack = request->stack;
 	unlang_stack_frame_t		*frame = &stack->frame[stack->depth];
@@ -437,20 +440,21 @@ int unlang_module_set_resume(request_t *request, unlang_module_resume_t resume)
  * @param[in] exp		XLAT expansion to evaluate.
  * @param[in] resume		function to call when the XLAT expansion is complete.
  * @param[in] signal		function to call if a signal is received.
+ * @param[in] sigmask		Signals to block.
  * @param[in] rctx		to pass to the resume() and signal() callbacks.
  * @return
  *	- UNLANG_ACTION_PUSHED_CHILD
  */
-unlang_action_t unlang_module_yield_to_xlat(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_HEAD(fr_value_box_list) *out,
+unlang_action_t unlang_module_yield_to_xlat(TALLOC_CTX *ctx, bool *p_success, fr_value_box_list_t *out,
 					    request_t *request, xlat_exp_head_t const *exp,
-					    unlang_module_resume_t resume,
-					    unlang_module_signal_t signal, void *rctx)
+					    module_method_t resume,
+					    unlang_module_signal_t signal, fr_signal_t sigmask, void *rctx)
 {
 	/*
 	 *	Push the resumption point BEFORE pushing the xlat onto
 	 *	the parents stack.
 	 */
-	(void) unlang_module_yield(request, resume, signal, rctx);
+	(void) unlang_module_yield(request, resume, signal, sigmask, rctx);
 
 	/*
 	 *	Push the xlat function
@@ -483,21 +487,22 @@ unlang_action_t unlang_module_yield_to_xlat(TALLOC_CTX *ctx, bool *p_success, FR
  *				types of xlats.
  * @param[in] resume		function to call when the XLAT expansion is complete.
  * @param[in] signal		function to call if a signal is received.
+ * @param[in] sigmask		Signals to block.
  * @param[in] rctx		to pass to the resume() and signal() callbacks.
  * @return
  *	- UNLANG_ACTION_PUSHED_CHILD
  */
-unlang_action_t unlang_module_yield_to_tmpl(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out,
+unlang_action_t unlang_module_yield_to_tmpl(TALLOC_CTX *ctx, fr_value_box_list_t *out,
 					    request_t *request, tmpl_t const *vpt,
 					    unlang_tmpl_args_t *args,
-					    unlang_module_resume_t resume,
-					    unlang_module_signal_t signal, void *rctx)
+					    module_method_t resume,
+					    unlang_module_signal_t signal, fr_signal_t sigmask, void *rctx)
 {
 	/*
 	 *	Push the resumption point BEFORE pushing the xlat onto
 	 *	the parents stack.
 	 */
-	(void) unlang_module_yield(request, resume, signal, rctx);
+	(void) unlang_module_yield(request, resume, signal, sigmask, rctx);
 
 	/*
 	 *	Push the xlat function
@@ -512,13 +517,14 @@ unlang_action_t unlang_module_yield_to_tmpl(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_va
 unlang_action_t unlang_module_yield_to_section(rlm_rcode_t *p_result,
 					       request_t *request, CONF_SECTION *subcs,
 					       rlm_rcode_t default_rcode,
-					       unlang_module_resume_t resume,
-					       unlang_module_signal_t signal, void *rctx)
+					       module_method_t resume,
+					       unlang_module_signal_t signal, fr_signal_t sigmask, void *rctx)
 {
 	if (!subcs) {
 		unlang_stack_t		*stack = request->stack;
 		unlang_stack_frame_t	*frame = &stack->frame[stack->depth];
 		unlang_module_t		*mc;
+		unlang_frame_state_module_t	*state;
 
 		fr_assert(frame->instruction->type == UNLANG_TYPE_MODULE);
 		mc = unlang_generic_to_module(frame->instruction);
@@ -529,9 +535,11 @@ unlang_action_t unlang_module_yield_to_section(rlm_rcode_t *p_result,
 		 *	anyway when we return.
 		 */
 		stack->result = frame->result = default_rcode;
+		state = talloc_get_type_abort(frame->state, unlang_frame_state_module_t);
 
 		return resume(p_result,
-			      MODULE_CTX(mc->instance->dl_inst, module_thread(mc->instance)->data, rctx),
+			      MODULE_CTX(mc->instance->dl_inst, module_thread(mc->instance)->data,
+			      		 state->env_data, rctx),
 			      request);
 	}
 
@@ -539,7 +547,7 @@ unlang_action_t unlang_module_yield_to_section(rlm_rcode_t *p_result,
 	 *	Push the resumption point BEFORE adding the subsection
 	 *	to the parents stack.
 	 */
-	(void) unlang_module_yield(request, resume, signal, rctx);
+	(void) unlang_module_yield(request, resume, signal, sigmask, rctx);
 
 	if (unlang_interpret_push_section(request, subcs,
 					  default_rcode, UNLANG_SUB_FRAME) < 0) return UNLANG_ACTION_STOP_PROCESSING;
@@ -560,12 +568,13 @@ unlang_action_t unlang_module_yield_to_section(rlm_rcode_t *p_result,
  * @param[in] request		The current request.
  * @param[in] resume		Called on unlang_interpret_mark_runnable().
  * @param[in] signal		Called on unlang_action().
+ * @param[in] sigmask		Set of signals to block.
  * @param[in] rctx		to pass to the callbacks.
  * @return
  *	- UNLANG_ACTION_YIELD.
  */
 unlang_action_t unlang_module_yield(request_t *request,
-				    unlang_module_resume_t resume, unlang_module_signal_t signal, void *rctx)
+				    module_method_t resume, unlang_module_signal_t signal, fr_signal_t sigmask, void *rctx)
 {
 	unlang_stack_t			*stack = request->stack;
 	unlang_stack_frame_t		*frame = &stack->frame[stack->depth];
@@ -576,6 +585,7 @@ unlang_action_t unlang_module_yield(request_t *request,
 	state->rctx = rctx;
 	state->resume = resume;
 	state->signal = signal;
+	state->sigmask = sigmask;
 
 	/*
 	 *	We set the repeatable flag here,
@@ -614,7 +624,7 @@ static inline CC_HINT(always_inline) void safe_unlock(module_instance_t *mi)
  * @param[in] frame		current stack frame.
  * @param[in] action		to signal.
  */
-static void unlang_module_signal(request_t *request, unlang_stack_frame_t *frame, fr_state_signal_t action)
+static void unlang_module_signal(request_t *request, unlang_stack_frame_t *frame, fr_signal_t action)
 {
 	unlang_frame_state_module_t	*state = talloc_get_type_abort(frame->state, unlang_frame_state_module_t);
 	unlang_module_t			*mc = unlang_generic_to_module(frame->instruction);
@@ -628,7 +638,7 @@ static void unlang_module_signal(request_t *request, unlang_stack_frame_t *frame
 	caller = request->module;
 	request->module = mc->instance->name;
 	safe_lock(mc->instance);
-	state->signal(MODULE_CTX(mc->instance->dl_inst, state->thread->data, state->rctx), request, action);
+	if (!(action & state->sigmask)) state->signal(MODULE_CTX(mc->instance->dl_inst, state->thread->data, state->env_data, state->rctx), request, action);
 	safe_unlock(mc->instance);
 	request->module = caller;
 
@@ -689,7 +699,7 @@ static unlang_action_t unlang_module_resume(rlm_rcode_t *p_result, request_t *re
 {
 	unlang_frame_state_module_t	*state = talloc_get_type_abort(frame->state, unlang_frame_state_module_t);
 	unlang_module_t			*mc = unlang_generic_to_module(frame->instruction);
-	unlang_module_resume_t		resume;
+	module_method_t		resume;
 	unlang_action_t			ua;
 
 	/*
@@ -718,7 +728,8 @@ static unlang_action_t unlang_module_resume(rlm_rcode_t *p_result, request_t *re
 	state->resume = NULL;
 
 	safe_lock(mc->instance);
-	ua = resume(&state->rcode, MODULE_CTX(mc->instance->dl_inst, state->thread->data, state->rctx), request);
+	ua = resume(&state->rcode, MODULE_CTX(mc->instance->dl_inst, state->thread->data,
+					      state->env_data, state->rctx), request);
 	safe_unlock(mc->instance);
 
 	if (request->master_state == REQUEST_STOP_PROCESSING) ua = UNLANG_ACTION_STOP_PROCESSING;
@@ -864,7 +875,6 @@ static void unlang_module_event_retry_handler(UNUSED fr_event_list_t *el, fr_tim
 	frame->signal(request, frame, FR_SIGNAL_TIMEOUT);
 }
 
-
 static unlang_action_t unlang_module(rlm_rcode_t *p_result, request_t *request, unlang_stack_frame_t *frame)
 {
 	unlang_module_t			*mc;
@@ -889,12 +899,7 @@ static unlang_action_t unlang_module(rlm_rcode_t *p_result, request_t *request, 
 	RDEBUG4("[%i] %s - %s (%s)", stack_depth_current(request), __FUNCTION__,
 		mc->instance->name, mc->instance->module->name);
 
-	/*
-	 *	Grab the thread/module specific data if any exists.
-	 */
-	state->thread = module_thread(mc->instance);
 	state->p_result = NULL;
-	fr_assert(state->thread != NULL);
 
 	/*
 	 *	Return administratively configured return code
@@ -904,6 +909,27 @@ static unlang_action_t unlang_module(rlm_rcode_t *p_result, request_t *request, 
 		ua = UNLANG_ACTION_CALCULATE_RESULT;
 		goto done;
 	}
+
+	if (mc->method_env && !state->env_data) {
+		ua = call_env_expand(state, request, &state->env_data, mc->method_env, &mc->call_env_parsed);
+		switch (ua) {
+		case UNLANG_ACTION_FAIL:
+			goto fail;
+
+		case UNLANG_ACTION_PUSHED_CHILD:
+			frame_repeat(frame, unlang_module);
+			return UNLANG_ACTION_PUSHED_CHILD;
+
+		default:
+			break;
+		}
+	}
+
+	/*
+	 *	Grab the thread/module specific data if any exists.
+	 */
+	state->thread = module_thread(mc->instance);
+	fr_assert(state->thread != NULL);
 
 	/*
 	 *	Don't allow returning _through_ modules
@@ -924,7 +950,7 @@ static unlang_action_t unlang_module(rlm_rcode_t *p_result, request_t *request, 
 	request->module = mc->instance->name;
 	safe_lock(mc->instance);	/* Noop unless instance->mutex set */
 	ua = mc->method(&state->rcode,
-			MODULE_CTX(mc->instance->dl_inst, state->thread->data, NULL),
+			MODULE_CTX(mc->instance->dl_inst, state->thread->data, state->env_data, NULL),
 			request);
 	safe_unlock(mc->instance);
 

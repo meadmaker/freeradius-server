@@ -282,7 +282,7 @@ static fr_connection_state_t conn_init(void **h_out, fr_connection_t *conn, void
 	/*
 	 *	Open the outgoing socket.
 	 */
-	fd = fr_socket_client_tcp(&h->src_ipaddr, &h->inst->dst_ipaddr, h->inst->dst_port, true);
+	fd = fr_socket_client_tcp(NULL, &h->src_ipaddr, &h->inst->dst_ipaddr, h->inst->dst_port, true);
 	if (fd < 0) {
 		PERROR("%s - Failed opening socket", h->module_name);
 		talloc_free(h);
@@ -543,12 +543,12 @@ static int8_t request_prioritise(void const *one, void const *two)
  *	- >0 for how many bytes were decoded
  */
 static ssize_t decode(TALLOC_CTX *ctx, fr_pair_list_t *reply, uint8_t *response_code,
-			    udp_handle_t *h, request_t *request, udp_request_t *u,
-			    uint8_t *data, size_t data_len)
+		      udp_handle_t *h, request_t *request, udp_request_t *u,
+		      uint8_t *data, size_t data_len)
 {
 	rlm_tacacs_tcp_t const *inst = h->thread->inst;
 	ssize_t			packet_len;
-	uint8_t			code;
+	int			code;
 
 	*response_code = 0;	/* Initialise to keep the rest of the code happy */
 
@@ -565,14 +565,12 @@ static ssize_t decode(TALLOC_CTX *ctx, fr_pair_list_t *reply, uint8_t *response_
 	 *	This only fails if the packet is strangely malformed,
 	 *	or if we run out of memory.
 	 */
-	packet_len = fr_tacacs_decode(ctx, reply, data, data_len, NULL, inst->secret, inst->secretlen);
+	packet_len = fr_tacacs_decode(ctx, reply, NULL, data, data_len, NULL, inst->secret, inst->secretlen, &code);
 	if (packet_len < 0) {
 		RPEDEBUG("Failed decoding TACACS+ reply packet");
 		fr_pair_list_free(reply);
 		return -1;
 	}
-
-	code = data[1];
 
 	RDEBUG("Received %s ID %d length %ld reply packet on connection %s",
 	       fr_tacacs_packet_names[code], code, packet_len, h->name);
@@ -799,12 +797,6 @@ static void request_mux(fr_event_list_t *el,
 	uint16_t		i, queued;
 	uint8_t const		*written;
 	uint8_t			*partial;
-
-	/*
-	 *	If the connection is zombie, then don't try to enqueue
-	 *	things on it!
-	 */
-	if (check_for_zombie(el, tconn, fr_time_wrap(0), h->last_sent)) return;
 
 	/*
 	 *	Encode multiple packets in preparation for transmission with write()
@@ -1304,7 +1296,7 @@ static unlang_action_t mod_resume(rlm_rcode_t *p_result, module_ctx_t const *mct
 	RETURN_MODULE_RCODE(rcode);
 }
 
-static void mod_signal(module_ctx_t const *mctx, UNUSED request_t *request, fr_state_signal_t action)
+static void mod_signal(module_ctx_t const *mctx, UNUSED request_t *request, fr_signal_t action)
 {
 //	udp_thread_t		*t = talloc_get_type_abort(mctx->thread, udp_thread_t);
 	udp_result_t		*r = talloc_get_type_abort(mctx->rctx, udp_result_t);
@@ -1383,6 +1375,7 @@ static unlang_action_t mod_enqueue(rlm_rcode_t *p_result, void **rctx_out, UNUSE
 	udp_result_t			*r;
 	udp_request_t			*u;
 	fr_trunk_request_t		*treq;
+	fr_trunk_enqueue_t		q;
 
 	fr_assert(FR_TACACS_PACKET_CODE_VALID(request->packet->code));
 
@@ -1404,11 +1397,21 @@ static unlang_action_t mod_enqueue(rlm_rcode_t *p_result, void **rctx_out, UNUSE
 
 	r->rcode = RLM_MODULE_FAIL;
 
-	if (fr_trunk_request_enqueue(&treq, t->trunk, request, u, r) < 0) {
+	q = fr_trunk_request_enqueue(&treq, t->trunk, request, u, r);
+	if (q < 0) {
 		fr_assert(!u->packet);	/* Should not have been fed to the muxer */
 		fr_trunk_request_free(&treq);		/* Return to the free list */
+	fail:
 		talloc_free(r);
 		RETURN_MODULE_FAIL;
+	}
+
+	/*
+	 *	All destinations are down.
+	 */
+	if (q == FR_TRUNK_ENQUEUE_IN_BACKLOG) {
+		RDEBUG("All destinations are down - cannot send packet");
+		goto fail;
 	}
 
 	r->treq = treq;	/* Remember for signalling purposes */

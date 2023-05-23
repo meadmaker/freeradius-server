@@ -37,6 +37,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/pairmove.h>
 #include <freeradius-devel/util/debug.h>
 #include <freeradius-devel/util/table.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include <sys/stat.h>
 
@@ -167,7 +168,7 @@ static int sql_xlat_escape(request_t *request, fr_value_box_t *vb, void *uctx)
 	size_t					len;
 	rlm_sql_handle_t			*handle;
 	rlm_sql_t				*inst = talloc_get_type_abort(uctx, rlm_sql_t);
-	FR_DLIST_ENTRY(fr_value_box_list)	entry;
+	fr_value_box_entry_t			entry;
 
 	handle = fr_pool_connection_get(inst->pool, request);
 	if (!handle) {
@@ -212,7 +213,7 @@ static int sql_xlat_escape(request_t *request, fr_value_box_t *vb, void *uctx)
  */
 static xlat_action_t sql_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			      xlat_ctx_t const *xctx,
-			      request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			      request_t *request, fr_value_box_list_t *in)
 {
 	rlm_sql_handle_t	*handle = NULL;
 	rlm_sql_row_t		row;
@@ -369,18 +370,19 @@ static int sql_map_verify(CONF_SECTION *cs, UNUSED void *mod_inst, UNUSED void *
 
 /** Executes a SELECT query and maps the result to server attributes
  *
+ * @param p_result	Result of map expansion:
+ *			- #RLM_MODULE_NOOP no rows were returned or columns matched.
+ *			- #RLM_MODULE_UPDATED if one or more #fr_pair_t were added to the #request_t.
+ *			- #RLM_MODULE_FAIL if a fault occurred.
  * @param mod_inst #rlm_sql_t instance.
  * @param proc_inst Instance data for this specific mod_proc call (unused).
  * @param request The current request.
  * @param query string to execute.
  * @param maps Head of the map list.
- * @return
- *	- #RLM_MODULE_NOOP no rows were returned or columns matched.
- *	- #RLM_MODULE_UPDATED if one or more #fr_pair_t were added to the #request_t.
- *	- #RLM_MODULE_FAIL if a fault occurred.
+ * @return UNLANG_ACTION_CALCULATE_RESULT
  */
-static rlm_rcode_t mod_map_proc(void *mod_inst, UNUSED void *proc_inst, request_t *request,
-				FR_DLIST_HEAD(fr_value_box_list) *query, map_list_t const *maps)
+static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, void *mod_inst, UNUSED void *proc_inst, request_t *request,
+				    fr_value_box_list_t *query, map_list_t const *maps)
 {
 	rlm_sql_t		*inst = talloc_get_type_abort(mod_inst, rlm_sql_t);
 	rlm_sql_handle_t	*handle = NULL;
@@ -411,7 +413,7 @@ static rlm_rcode_t mod_map_proc(void *mod_inst, UNUSED void *proc_inst, request_
 
 	if (!query_head) {
 		REDEBUG("Query cannot be (null)");
-		return RLM_MODULE_FAIL;
+		RETURN_MODULE_FAIL;
 	}
 
 	if (fr_value_box_list_concat_in_place(request,
@@ -419,7 +421,7 @@ static rlm_rcode_t mod_map_proc(void *mod_inst, UNUSED void *proc_inst, request_
 					      FR_VALUE_BOX_LIST_FREE, true,
 					      SIZE_MAX) < 0) {
 		RPEDEBUG("Failed concatenating input string");
-		return RLM_MODULE_FAIL;
+		RETURN_MODULE_FAIL;
 	}
 	query_str = query_head->vb_strvalue;
 
@@ -434,8 +436,7 @@ static rlm_rcode_t mod_map_proc(void *mod_inst, UNUSED void *proc_inst, request_
 
 	handle = fr_pool_connection_get(inst->pool, request);		/* connection pool should produce error */
 	if (!handle) {
-		rcode = RLM_MODULE_FAIL;
-		goto finish;
+		RETURN_MODULE_FAIL;
 	}
 
 	rlm_sql_query_log(inst, request, NULL, query_str);
@@ -546,7 +547,7 @@ finish:
 	talloc_free(fields);
 	fr_pool_connection_release(inst->pool, request, handle);
 
-	return rcode;
+	RETURN_MODULE_RCODE(rcode);
 }
 
 
@@ -1058,19 +1059,21 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	Register the SQL xlat function
 	 */
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, sql_xlat, FR_TYPE_VOID, NULL);	/* Returns an integer sometimes */
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, sql_xlat, FR_TYPE_VOID);	/* Returns an integer sometimes */
 
 	/*
 	 *	The xlat escape function needs access to inst - so
 	 *	argument parser details need to be defined here
 	 */
-	sql_xlat_arg = talloc_zero(inst, xlat_arg_parser_t);
-	sql_xlat_arg->type = FR_TYPE_STRING;
-	sql_xlat_arg->required = true;
-	sql_xlat_arg->concat = true;
-	sql_xlat_arg->func = sql_xlat_escape;
-	sql_xlat_arg->uctx = inst;
-	xlat_func_mono(xlat, sql_xlat_arg);
+	sql_xlat_arg = talloc_zero_array(inst, xlat_arg_parser_t, 2);
+	sql_xlat_arg[0].type = FR_TYPE_STRING;
+	sql_xlat_arg[0].required = true;
+	sql_xlat_arg[0].concat = true;
+	sql_xlat_arg[0].func = sql_xlat_escape;
+	sql_xlat_arg[0].uctx = inst;
+	sql_xlat_arg[1] = (xlat_arg_parser_t)XLAT_ARG_PARSER_TERMINATOR;
+
+	xlat_func_mono_set(xlat, sql_xlat_arg);
 
 	/*
 	 *	Register the SQL map processor function
@@ -1146,14 +1149,6 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 	inst->ef = module_rlm_exfile_init(inst, conf, 256, fr_time_delta_from_sec(30), true, NULL, NULL);
 	if (!inst->ef) {
 		cf_log_err(conf, "Failed creating log file context");
-		return -1;
-	}
-
-	/*
-	 *	Ensure the driver is instantiated before attempting connections
-	 */
-	if (module_instantiate(inst->driver_submodule) < 0) {
-		cf_log_err(conf, "Failed instantiating SQL driver");
 		return -1;
 	}
 

@@ -26,6 +26,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/modpriv.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include "interpret_priv.h"
 #include "module_priv.h"
@@ -556,8 +557,11 @@ unlang_frame_action_t frame_eval(request_t *request, unlang_stack_frame_t *frame
 		 *	now continue at the deepest frame.
 		 */
 		case UNLANG_ACTION_PUSHED_CHILD:
+			fr_assert_msg(&stack->frame[stack->depth] > frame,
+				      "Instruction %s returned UNLANG_ACTION_PUSHED_CHILD, "
+				      "but stack depth was not increased",
+				      instruction->name);
 			unlang_frame_perf_yield(frame);
-			fr_assert(&stack->frame[stack->depth] > frame);
 			*result = frame->result;
 			return UNLANG_FRAME_ACTION_NEXT;
 
@@ -578,6 +582,10 @@ unlang_frame_action_t frame_eval(request_t *request, unlang_stack_frame_t *frame
 		 *	called the interpreter.
 		 */
 		case UNLANG_ACTION_YIELD:
+			fr_assert_msg(&stack->frame[stack->depth] == frame,
+				      "Instruction %s returned UNLANG_ACTION_YIELD, but pushed additional "
+				      "frames for evaluation.  Instruction should return UNLANG_ACTION_PUSHED_CHILD "
+				      "instead", instruction->name);
 			unlang_frame_perf_yield(frame);
 			yielded_set(frame);
 			RDEBUG4("** [%i] %s - yielding with current (%s %d)", stack->depth, __FUNCTION__,
@@ -588,7 +596,7 @@ unlang_frame_action_t frame_eval(request_t *request, unlang_stack_frame_t *frame
 
 		/*
 		 *	This action is intended to be returned by library
-		 *	functions.  It reduces the boilerplate.
+		 *	functions.  It reduces boilerplate.
 		 */
 		case UNLANG_ACTION_FAIL:
 			*result = RLM_MODULE_FAIL;
@@ -990,7 +998,7 @@ void unlang_interpret_request_done(request_t *request)
 		break;
 
 	case REQUEST_TYPE_DETACHED:
-		intp->funcs.done_detached(request, stack->result, intp->uctx);
+		intp->funcs.done_detached(request, stack->result, intp->uctx);	/* Callback will usually free the request */
 		break;
 	}
 }
@@ -1017,8 +1025,12 @@ void unlang_interpret_request_detach(request_t *request)
 
 	if (!fr_cond_assert(stack != NULL)) return;
 
+	if (!request_is_detachable(request)) return;
+
 	intp = stack->intp;
 	intp->funcs.detach(request, intp->uctx);
+
+	if (request_detach(request) < 0) RPEDEBUG("Failed detaching request");
 }
 
 /** Send a signal (usually stop) to a request
@@ -1036,7 +1048,7 @@ void unlang_interpret_request_detach(request_t *request)
  * @param[in] action		to signal.
  * @param[in] limit		the frame at which to stop signaling.
  */
-void unlang_frame_signal(request_t *request, fr_state_signal_t action, int limit)
+void unlang_frame_signal(request_t *request, fr_signal_t action, int limit)
 {
 	unlang_stack_frame_t	*frame;
 	unlang_stack_t		*stack = request->stack;
@@ -1090,7 +1102,7 @@ void unlang_frame_signal(request_t *request, fr_state_signal_t action, int limit
  * @param[in] request		The current request.
  * @param[in] action		to signal.
  */
-void unlang_interpret_signal(request_t *request, fr_state_signal_t action)
+void unlang_interpret_signal(request_t *request, fr_signal_t action)
 {
 	unlang_stack_t		*stack = request->stack;
 
@@ -1116,13 +1128,33 @@ void unlang_interpret_signal(request_t *request, fr_state_signal_t action)
 
 	switch (action) {
 	case FR_SIGNAL_CANCEL:
-		unlang_interpret_request_stop(request);		/* Stop gets the request in a consistent state */
-		unlang_interpret_request_done(request);		/* Done signals the request is complete */
+		/*
+		 *	Detach the request from the parent to cleanup
+		 *	any cross-request pointers.  This is a noop
+		 *	if the request is not detachable.
+		 */
+		if (request_is_detachable(request)) unlang_interpret_request_detach(request);
+
+		/*
+		 *	Get the request into a consistent state,
+		 *	removing it from any runnable lists.
+		 */
+		unlang_interpret_request_stop(request);
+
+		/*
+		 *	As the request is detached, we call the done_detached
+		 *	callback which should free the request.
+		 */
+		unlang_interpret_request_done(request);
 		break;
 
 	case FR_SIGNAL_DETACH:
-		unlang_interpret_request_detach(request);	/* Tell our caller that the request is being detached */
-		if (request_detach(request) < 0) RPEDEBUG("Failed detaching request");
+		/*
+		 *	Cleanup any cross-request pointers, and mark the
+		 *	request as detached.  When the request completes it
+		 *	should by automatically freed.
+		 */
+		unlang_interpret_request_detach(request);
 		break;
 
 	default:
@@ -1285,6 +1317,118 @@ TALLOC_CTX *unlang_interpret_frame_talloc_ctx(request_t *request)
 	return (TALLOC_CTX *)(frame->state = talloc_new(request));
 }
 
+static xlat_arg_parser_t const unlang_cancel_xlat_args[] = {
+	{ .required = false, .single = true, .type = FR_TYPE_TIME_DELTA },
+	XLAT_ARG_PARSER_TERMINATOR
+};
+
+static xlat_action_t unlang_cancel_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
+					UNUSED xlat_ctx_t const *xctx,
+					request_t *request, fr_value_box_list_t *args);
+
+/** Signal the request to stop executing
+ *
+ * The request can't be running at this point because we're in the event
+ * loop.  This means the request is always in a consistent state when
+ * the timeout event fires, even if that's state is waiting on I/O.
+ */
+static void unlang_cancel_event(UNUSED fr_event_list_t *el, UNUSED fr_time_t now, void *uctx)
+{
+	request_t *request = talloc_get_type_abort(uctx, request_t);
+
+	RDEBUG2("Request canceled by dynamic timeout");
+
+	unlang_interpret_signal(request, FR_SIGNAL_CANCEL);
+
+	/*
+	 *	Cleans up the memory allocated to hold
+	 *	the pointer, not the event itself.
+	 */
+	talloc_free(request_data_get(request, (void *)unlang_cancel_xlat, 0));
+}
+
+static xlat_action_t unlang_cancel_never_run(UNUSED TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
+					     UNUSED xlat_ctx_t const *xctx,
+					     UNUSED request_t *request, UNUSED fr_value_box_list_t *in)
+{
+	fr_assert_msg(0, "Should never be run");
+	return XLAT_ACTION_FAIL;
+}
+
+/** Allows a request to dynamically alter its own lifetime
+ *
+ */
+static xlat_action_t unlang_cancel_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
+					UNUSED xlat_ctx_t const *xctx,
+					request_t *request, fr_value_box_list_t *args)
+{
+	fr_value_box_t		*timeout;
+	fr_event_list_t		*el = unlang_interpret_event_list(request);
+	fr_event_timer_t const  **ev_p, **ev_p_og;
+	fr_value_box_t		*vb;
+	fr_time_t		when = fr_time_from_sec(0); /* Invalid clang complaints if we don't set this */
+
+	XLAT_ARGS(args, &timeout);
+
+	/*
+	 *	First see if we already have a timeout event
+	 *	that was previously added by this xlat.
+	 */
+	ev_p = ev_p_og = request_data_get(request, (void *)unlang_cancel_xlat, 0);
+	if (ev_p) {
+		if (*ev_p) when = fr_event_timer_when(*ev_p);	/* *ev_p should never be NULL, really... */
+	} else {
+		/*
+		 *	Must not be parented from the request
+		 *	as this is freed by request data.
+		 */
+		MEM(ev_p = talloc_zero(NULL, fr_event_timer_t const *));
+	}
+
+	if (unlikely(fr_event_timer_in(ev_p, el, ev_p,
+				       timeout ? timeout->vb_time_delta : fr_time_delta_from_sec(0),
+				       unlang_cancel_event, request) < 0)) {
+		RPERROR("Failed inserting cancellation event");
+		talloc_free(ev_p);
+		return XLAT_ACTION_FAIL;
+	}
+	if (unlikely(request_data_add(request, (void *)unlang_cancel_xlat, 0,
+				      UNCONST(fr_event_timer_t **, ev_p), true, true, false) < 0)) {
+		RPERROR("Failed associating cancellation event with request");
+		talloc_free(ev_p);
+		return XLAT_ACTION_FAIL;
+	}
+
+	/*
+	 *	No timeout means cancel immediately, so yield allowing
+	 *	the interpreter to run the event we added to cancel
+	 *	the request.
+	 *
+	 *	We call unlang_xlat_yield to keep the interpreter happy
+	 *	as it expects to see a resume function set.
+	 */
+	if (!timeout) return unlang_xlat_yield(request, unlang_cancel_never_run, NULL, 0, NULL);
+
+	if (ev_p_og) {
+		MEM(vb = fr_value_box_alloc(ctx, FR_TYPE_TIME_DELTA, NULL, false));
+
+		/*
+		 *	Return how long before the previous
+		 *	cancel event would have fired.
+		 *
+		 *	This can be useful for doing stacked
+		 *	cancellations in policy.
+		 */
+		vb->vb_time_delta = fr_time_sub(when, fr_time());
+		fr_dcursor_insert(out, vb);
+	}
+
+	/*
+	 *	No value if this is the first cleanup event
+	 */
+	return XLAT_ACTION_DONE;
+}
+
 static xlat_arg_parser_t const unlang_interpret_xlat_args[] = {
 	{ .required = true, .single = true, .type = FR_TYPE_STRING },
 	XLAT_ARG_PARSER_TERMINATOR
@@ -1296,7 +1440,7 @@ static xlat_arg_parser_t const unlang_interpret_xlat_args[] = {
  */
 static xlat_action_t unlang_interpret_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					   UNUSED xlat_ctx_t const *xctx,
-					   request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					   request_t *request, fr_value_box_list_t *in)
 {
 	unlang_stack_t		*stack = request->stack;
 	int			depth = stack->depth;
@@ -1367,7 +1511,7 @@ static xlat_action_t unlang_interpret_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	 *	All of the remaining things need a CONF_ITEM.
 	 */
 	if (!instruction->ci) {
-		if (fr_value_box_bstrndup(ctx, vb, NULL, "???", 3, false) < 0) goto error;
+		if (fr_value_box_bstrndup(ctx, vb, NULL, "<INVALID>", 3, false) < 0) goto error;
 			goto finish;
 	}
 
@@ -1497,13 +1641,18 @@ unlang_interpret_t *unlang_interpret_get_thread_default(void)
 	return talloc_get_type_abort(intp_thread_default, unlang_interpret_t);
 }
 
-void unlang_interpret_init_global(void)
+int unlang_interpret_init_global(void)
 {
 	xlat_t	*xlat;
 	/*
 	 *  Should be void, but someone decided not to register multiple xlats
 	 *  breaking the convention we use everywhere else in the server...
 	 */
-	xlat = xlat_register(NULL, "interpreter", unlang_interpret_xlat, FR_TYPE_VOID, NULL);
-	xlat_func_args(xlat, unlang_interpret_xlat_args);
+	if (unlikely((xlat = xlat_func_register(NULL, "interpreter", unlang_interpret_xlat, FR_TYPE_VOID)) == NULL)) return -1;
+	xlat_func_args_set(xlat, unlang_interpret_xlat_args);
+
+	if (unlikely((xlat = xlat_func_register(NULL, "cancel", unlang_cancel_xlat, FR_TYPE_VOID)) == NULL)) return -1;
+	xlat_func_args_set(xlat, unlang_cancel_xlat_args);
+
+	return 0;
 }

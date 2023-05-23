@@ -34,6 +34,8 @@ RCSID("$Id$")
 #include <freeradius-devel/tls/log.h>
 #include <freeradius-devel/tls/strerror.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
+#include <freeradius-devel/unlang/xlat.h>
 
 #include <freeradius-devel/tls/openssl_user_macros.h>
 #include <openssl/crypto.h>
@@ -563,10 +565,9 @@ static int cipher_rsa_certificate_file_load(TALLOC_CTX *ctx, void *out, void *pa
 	return 0;
 }
 
-static xlat_arg_parser_t const cipher_rsa_encrypt_xlat_arg = {
-	.required = true,
-	.concat = true,
-	.type = FR_TYPE_STRING
+static xlat_arg_parser_t const cipher_rsa_encrypt_xlat_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	XLAT_ARG_PARSER_TERMINATOR
 };
 
 /** Encrypt input data
@@ -574,7 +575,7 @@ static xlat_arg_parser_t const cipher_rsa_encrypt_xlat_arg = {
  * Arguments are @verbatim(<plaintext>...)@endverbatim
  *
 @verbatim
-%{<inst>_encrypt:<plaintext>...}
+%{<inst>.encrypt:<plaintext>...}
 @endverbatim
  *
  * If multiple arguments are provided they will be concatenated.
@@ -583,7 +584,7 @@ static xlat_arg_parser_t const cipher_rsa_encrypt_xlat_arg = {
  */
 static xlat_action_t cipher_rsa_encrypt_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					     xlat_ctx_t const *xctx,
-					     request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					     request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cipher_rsa_thread_inst_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_cipher_rsa_thread_inst_t);
 
@@ -625,10 +626,9 @@ static xlat_action_t cipher_rsa_encrypt_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 }
 
 
-static xlat_arg_parser_t const cipher_rsa_sign_xlat_arg = {
-	.required = true,
-	.concat = true,
-	.type = FR_TYPE_STRING,
+static xlat_arg_parser_t const cipher_rsa_sign_xlat_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	XLAT_ARG_PARSER_TERMINATOR
 };
 
 /** Sign input data
@@ -636,7 +636,7 @@ static xlat_arg_parser_t const cipher_rsa_sign_xlat_arg = {
  * Arguments are @verbatim(<plaintext>...)@endverbatim
  *
 @verbatim
-%{<inst>_sign:<plaintext>...}
+%{<inst>.sign:<plaintext>...}
 @endverbatim
  *
  * If multiple arguments are provided they will be concatenated.
@@ -645,7 +645,7 @@ static xlat_arg_parser_t const cipher_rsa_sign_xlat_arg = {
  */
 static xlat_action_t cipher_rsa_sign_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					  xlat_ctx_t const *xctx,
-					  request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					  request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cipher_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_cipher_t);
 	rlm_cipher_rsa_thread_inst_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_cipher_rsa_thread_inst_t);
@@ -704,10 +704,9 @@ static xlat_action_t cipher_rsa_sign_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	return XLAT_ACTION_DONE;
 }
 
-static xlat_arg_parser_t const cipher_rsa_decrypt_xlat_arg = {
-	.required = true,
-	.concat = true,
-	.type = FR_TYPE_OCTETS
+static xlat_arg_parser_t const cipher_rsa_decrypt_xlat_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_OCTETS },
+	XLAT_ARG_PARSER_TERMINATOR
 };
 
 /** Decrypt input data
@@ -715,7 +714,7 @@ static xlat_arg_parser_t const cipher_rsa_decrypt_xlat_arg = {
  * Arguments are @verbatim(<ciphertext\>...)@endverbatim
  *
 @verbatim
-%{<inst>_decrypt:<ciphertext>...}
+%{<inst>.decrypt:<ciphertext>...}
 @endverbatim
  *
  * If multiple arguments are provided they will be concatenated.
@@ -724,7 +723,7 @@ static xlat_arg_parser_t const cipher_rsa_decrypt_xlat_arg = {
  */
 static xlat_action_t cipher_rsa_decrypt_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 					     xlat_ctx_t const *xctx,
-					     request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					     request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cipher_rsa_thread_inst_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_cipher_rsa_thread_inst_t);
 
@@ -765,10 +764,9 @@ static xlat_action_t cipher_rsa_decrypt_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 }
 
 static xlat_arg_parser_t const cipher_rsa_verify_xlat_arg[] = {
-	{ .required = true, .concat = false, .single = true, .variadic = false, .type = FR_TYPE_VOID,
-	  .func = NULL, .uctx = NULL },
-	{ .required = true, .concat = true, .single = false, .variadic = true, .type = FR_TYPE_STRING,
-	  .func = NULL, .uctx = NULL },
+	{ .required = true, .concat = false, .single = true, .type = FR_TYPE_VOID },
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	{ .variadic = XLAT_ARG_VARIADIC_EMPTY_SQUASH, .concat = true,  .type = FR_TYPE_STRING },
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -777,7 +775,7 @@ static xlat_arg_parser_t const cipher_rsa_verify_xlat_arg[] = {
  * Arguments are @verbatim(<signature>, <plaintext>...)@endverbatim
  *
 @verbatim
-%(<inst>_verify:<signature> <plaintext>...)
+%(<inst>.verify:<signature> <plaintext>...)
 @endverbatim
  *
  * If multiple arguments are provided (after @verbatim<signature>@endverbatim)
@@ -787,7 +785,7 @@ static xlat_arg_parser_t const cipher_rsa_verify_xlat_arg[] = {
  */
 static xlat_action_t cipher_rsa_verify_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 	    xlat_ctx_t const *xctx,
-					    request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					    request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cipher_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_cipher_t);
 	rlm_cipher_rsa_thread_inst_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_cipher_rsa_thread_inst_t);
@@ -882,8 +880,8 @@ static xlat_action_t cipher_rsa_verify_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 }
 
 static xlat_arg_parser_t const cipher_certificate_xlat_args[] = {
-	{ .required = true, .concat = false, .single = true, .variadic = false, .type = FR_TYPE_STRING },
-	{ .required = false, .concat = false, .single = true, .variadic = false, .type = FR_TYPE_STRING }, /* Optional hash for fingerprint mode */
+	{ .required = true, .concat = false, .single = true, .type = FR_TYPE_STRING },
+	{ .required = false, .concat = false, .single = true, .type = FR_TYPE_STRING }, /* Optional hash for fingerprint mode */
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -892,14 +890,14 @@ static xlat_arg_parser_t const cipher_certificate_xlat_args[] = {
  * Arguments are @verbatim(<digest>)@endverbatim
  *
 @verbatim
-%(<inst>_certificate:fingerprint <digest>)
+%(<inst>.certificate:fingerprint <digest>)
 @endverbatim
  *
  * @ingroup xlat_functions
  */
 static xlat_action_t cipher_fingerprint_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 	     xlat_ctx_t const *xctx,
-					     request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					     request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cipher_t const		*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_cipher_t);
 	char const			*md_name;
@@ -941,14 +939,14 @@ static xlat_action_t cipher_fingerprint_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 /** Return the serial of the public certificate
  *
 @verbatim
-%(<inst>_certificate:serial)
+%(<inst>.certificate:serial)
 @endverbatim
  *
  * @ingroup xlat_functions
  */
 static xlat_action_t cipher_serial_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 	xlat_ctx_t const *xctx,
-					request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+					request_t *request, UNUSED fr_value_box_list_t *in)
 {
 	rlm_cipher_t const	*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_cipher_t);
 	ASN1_INTEGER const	*serial;
@@ -970,7 +968,7 @@ static xlat_action_t cipher_serial_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 static xlat_action_t cipher_certificate_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 	     xlat_ctx_t const *xctx,
-					     request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+					     request_t *request, fr_value_box_list_t *in)
 {
 	rlm_cipher_t const	*inst = talloc_get_type_abort_const(xctx->mctx->inst->data, rlm_cipher_t);
 	char const		*attribute = fr_value_box_list_head(in)->vb_strvalue;
@@ -1295,28 +1293,22 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 		}
 
 		if (inst->rsa->private_key_file) {
-			char *xlat_name;
 			xlat_t *xlat;
 
 			/*
 			 *	Register decrypt xlat
 			 */
-			xlat_name = talloc_asprintf(inst, "%s_decrypt", mctx->inst->name);
-			xlat = xlat_register_module(inst, mctx, xlat_name, cipher_rsa_decrypt_xlat, FR_TYPE_STRING, NULL);
-			xlat_func_mono(xlat, &cipher_rsa_decrypt_xlat_arg);
-			talloc_free(xlat_name);
+			xlat = xlat_func_register_module(inst, mctx, "decrypt", cipher_rsa_decrypt_xlat, FR_TYPE_STRING);
+			xlat_func_mono_set(xlat, cipher_rsa_decrypt_xlat_arg);
 
 			/*
 			 *	Verify sign xlat
 			 */
-			xlat_name = talloc_asprintf(inst, "%s_verify", mctx->inst->name);
-			xlat = xlat_register_module(inst, mctx, xlat_name, cipher_rsa_verify_xlat, FR_TYPE_BOOL, NULL);
-			xlat_func_args(xlat, cipher_rsa_verify_xlat_arg);
-			talloc_free(xlat_name);
+			xlat = xlat_func_register_module(inst, mctx, "verify", cipher_rsa_verify_xlat, FR_TYPE_BOOL);
+			xlat_func_args_set(xlat, cipher_rsa_verify_xlat_arg);
 		}
 
 		if (inst->rsa->certificate_file) {
-			char *xlat_name;
 			xlat_t *xlat;
 
 			/*
@@ -1338,28 +1330,21 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 			/*
 			 *	Register encrypt xlat
 			 */
-			xlat_name = talloc_asprintf(inst, "%s_encrypt", mctx->inst->name);
-			xlat = xlat_register_module(inst, mctx, xlat_name, cipher_rsa_encrypt_xlat, FR_TYPE_OCTETS, NULL);
-			xlat_func_mono(xlat, &cipher_rsa_encrypt_xlat_arg);
-			talloc_free(xlat_name);
+			xlat = xlat_func_register_module(inst, mctx, "encrypt", cipher_rsa_encrypt_xlat, FR_TYPE_OCTETS);
+			xlat_func_mono_set(xlat, cipher_rsa_encrypt_xlat_arg);
 
 			/*
 			 *	Register sign xlat
 			 */
-			xlat_name = talloc_asprintf(inst, "%s_sign", mctx->inst->name);
-			xlat = xlat_register_module(inst, mctx, xlat_name, cipher_rsa_sign_xlat, FR_TYPE_OCTETS, NULL);
-			xlat_func_mono(xlat, &cipher_rsa_sign_xlat_arg);
-			talloc_free(xlat_name);
+			xlat = xlat_func_register_module(inst, mctx, "sign", cipher_rsa_sign_xlat, FR_TYPE_OCTETS);
+			xlat_func_mono_set(xlat, cipher_rsa_sign_xlat_arg);
 
 			/*
 			 *	FIXME: These should probably be split into separate xlats
 			 *	so we can optimise for return types.
 			 */
-			xlat_name = talloc_asprintf(inst, "%s_certificate", mctx->inst->name);
-			xlat = xlat_register_module(inst, mctx, xlat_name, cipher_certificate_xlat, FR_TYPE_VOID, NULL);
-			xlat_func_args(xlat, cipher_certificate_xlat_args);
-
-			talloc_free(xlat_name);
+			xlat = xlat_func_register_module(inst, mctx, "certificate", cipher_certificate_xlat, FR_TYPE_VOID);
+			xlat_func_args_set(xlat, cipher_certificate_xlat_args);
 		}
 		break;
 

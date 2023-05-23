@@ -756,7 +756,8 @@ static fr_connection_state_t conn_init(void **h_out, fr_connection_t *conn, void
 	/*
 	 *	Open the outgoing socket.
 	 */
-	fd = fr_socket_client_udp(&h->src_ipaddr, &h->src_port, &h->inst->dst_ipaddr, h->inst->dst_port, true);
+	fd = fr_socket_client_udp(h->inst->interface, &h->src_ipaddr, &h->src_port,
+				  &h->inst->dst_ipaddr, h->inst->dst_port, true);
 	if (fd < 0) {
 		PERROR("%s - Failed opening socket", h->module_name);
 	fail:
@@ -1535,7 +1536,7 @@ static void zombie_timeout(fr_event_list_t *el, fr_time_t now, void *uctx)
 	 *	Revive the connection after a time.
 	 */
 	if (fr_event_timer_at(h, el, &h->zombie_ev,
-			      fr_time_add(now, h->inst->parent->revive_interval), revive_timeout, h) < 0) {
+			      fr_time_add(now, h->inst->parent->revive_interval), revive_timeout, tconn) < 0) {
 		ERROR("Failed inserting revive timeout for connection");
 		fr_trunk_connection_signal_reconnect(tconn, FR_CONNECTION_FAILED);
 	}
@@ -1577,7 +1578,6 @@ static bool check_for_zombie(fr_event_list_t *el, fr_trunk_connection_t *tconn, 
 
 	/*
 	 *	If we're status checking OR already zombie, don't go to zombie
-	 *
 	 */
 	if (h->status_checking || h->zombie_ev) return true;
 
@@ -1594,13 +1594,7 @@ static bool check_for_zombie(fr_event_list_t *el, fr_trunk_connection_t *tconn, 
 	if (h->inst->parent->synchronous && fr_time_gt(last_sent, fr_time_wrap(0)) &&
 	    (fr_time_lt(fr_time_add(last_sent, h->inst->parent->response_window), now))) return false;
 
-	/*
-	 *	Mark the connection as inactive, but keep sending
-	 *	packets on it.
-	 */
 	WARN("%s - Entering Zombie state - connection %s", h->module_name, h->name);
-	fr_trunk_connection_signal_inactive(tconn);
-
 	if (h->inst->parent->status_check) {
 		h->status_checking = true;
 
@@ -1617,7 +1611,7 @@ static bool check_for_zombie(fr_event_list_t *el, fr_trunk_connection_t *tconn, 
 		}
 	} else {
 		if (fr_event_timer_at(h, el, &h->zombie_ev, fr_time_add(now, h->inst->parent->zombie_period),
-				      zombie_timeout, h) < 0) {
+				      zombie_timeout, tconn) < 0) {
 			ERROR("Failed inserting zombie timeout for connection");
 			fr_trunk_connection_signal_reconnect(tconn, FR_CONNECTION_FAILED);
 		}
@@ -1760,12 +1754,6 @@ static void request_mux(fr_event_list_t *el,
 	int			sent;
 	uint16_t		i, queued;
 	size_t			total_len = 0;
-
-	/*
-	 *	If the connection is zombie, then don't try to enqueue
-	 *	things on it!
-	 */
-	if (check_for_zombie(el, tconn, fr_time_wrap(0), h->last_sent)) return;
 
 	/*
 	 *	Encode multiple packets in preparation
@@ -2620,7 +2608,7 @@ static unlang_action_t mod_resume(rlm_rcode_t *p_result, module_ctx_t const *mct
 	RETURN_MODULE_RCODE(rcode);
 }
 
-static void mod_signal(module_ctx_t const *mctx, UNUSED request_t *request, fr_state_signal_t action)
+static void mod_signal(module_ctx_t const *mctx, UNUSED request_t *request, fr_signal_t action)
 {
 	udp_thread_t		*t = talloc_get_type_abort(mctx->thread, udp_thread_t);
 	udp_result_t		*r = talloc_get_type_abort(mctx->rctx, udp_result_t);
@@ -2718,6 +2706,7 @@ static unlang_action_t mod_enqueue(rlm_rcode_t *p_result, void **rctx_out, void 
 	udp_result_t			*r;
 	udp_request_t			*u;
 	fr_trunk_request_t		*treq;
+	fr_trunk_enqueue_t		q;
 
 	fr_assert(request->packet->code > 0);
 	fr_assert(request->packet->code < FR_RADIUS_CODE_MAX);
@@ -2762,11 +2751,22 @@ static unlang_action_t mod_enqueue(rlm_rcode_t *p_result, void **rctx_out, void 
 		pair_delete_request(attr_message_authenticator);
 	}
 
-	if (fr_trunk_request_enqueue(&treq, t->trunk, request, u, r) < 0) {
+	q = fr_trunk_request_enqueue(&treq, t->trunk, request, u, r);
+	if (q < 0) {
 		fr_assert(!u->rr && !u->packet);	/* Should not have been fed to the muxer */
 		fr_trunk_request_free(&treq);		/* Return to the free list */
+	fail:
 		talloc_free(r);
 		RETURN_MODULE_FAIL;
+	}
+
+	/*
+	 *	All destinations are down.
+	 */
+	if (q == FR_TRUNK_ENQUEUE_IN_BACKLOG) {
+		RDEBUG("All destinations are down - cannot send packet");
+		fr_trunk_request_signal_cancel(treq);
+		goto fail;
 	}
 
 	r->treq = treq;	/* Remember for signalling purposes */

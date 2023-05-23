@@ -46,31 +46,40 @@
  * The sequence number must never wrap i.e. if the sequence number 2^8-1 is ever reached,
  * that session must terminate and be restarted with a sequence number of 1.
  */
-#define packet_is_authen_start_request(p)	((p->hdr.type == FR_TAC_PLUS_AUTHEN) && (p->hdr.seq_no == 1))
-#define packet_is_authen_continue(p)		((p->hdr.type == FR_TAC_PLUS_AUTHEN) && (p->hdr.seq_no > 1) && ((p->hdr.seq_no % 2) == 1))
-#define packet_is_authen_reply(p)		((p->hdr.type == FR_TAC_PLUS_AUTHEN) && ((p->hdr.seq_no % 2) == 0))
+#define packet_is_authen_start_request(p)	(((p)->hdr.type == FR_TAC_PLUS_AUTHEN) && ((p)->hdr.seq_no == 1))
+#define packet_is_authen_continue(p)		(((p)->hdr.type == FR_TAC_PLUS_AUTHEN) && ((p)->hdr.seq_no > 1) && (((p)->hdr.seq_no % 2) == 1))
+#define packet_is_authen_reply(p)		(((p)->hdr.type == FR_TAC_PLUS_AUTHEN) && (((p)->hdr.seq_no % 2) == 0))
 
-#define packet_is_author_request(p)		((p->hdr.type == FR_TAC_PLUS_AUTHOR) && ((p->hdr.seq_no % 2) == 1))
-#define packet_is_author_reply(p)		((p->hdr.type == FR_TAC_PLUS_AUTHOR) && ((p->hdr.seq_no % 2) == 0))
+#define packet_is_author_request(p)		(((p)->hdr.type == FR_TAC_PLUS_AUTHOR) && (((p)->hdr.seq_no % 2) == 1))
+#define packet_is_author_reply(p)		(((p)->hdr.type == FR_TAC_PLUS_AUTHOR) && (((p)->hdr.seq_no % 2) == 0))
 
-#define packet_is_acct_request(p)		((p->hdr.type == FR_TAC_PLUS_ACCT) && ((p->hdr.seq_no % 2) == 1))
-#define packet_is_acct_reply(p)			((p->hdr.type == FR_TAC_PLUS_ACCT) && ((p->hdr.seq_no % 2) == 0))
+#define packet_is_acct_request(p)		(((p)->hdr.type == FR_TAC_PLUS_ACCT) && (((p)->hdr.seq_no % 2) == 1))
+#define packet_is_acct_reply(p)			(((p)->hdr.type == FR_TAC_PLUS_ACCT) && (((p)->hdr.seq_no % 2) == 0))
 
-#define packet_has_valid_seq_no(p)		(p->hdr.seq_no != 0)
+#define packet_has_valid_seq_no(p)		((p)->hdr.seq_no != 0)
+
+#define packet_is_encrypted(p)			(((p)->hdr.flags & FR_TAC_PLUS_UNENCRYPTED_FLAG) == 0)
 
 typedef enum {
-	FR_TAC_PLUS_INVALID		= 0x00,
-	FR_TAC_PLUS_AUTHEN		= 0x01,
-	FR_TAC_PLUS_AUTHOR		= 0x02,
-	FR_TAC_PLUS_ACCT		= 0x03,
-	FR_TAC_PLUS_MAX			= 0x04
+	FR_TAC_PLUS_INVALID			= 0x00,
+	FR_TAC_PLUS_AUTHEN			= 0x01,
+	FR_TAC_PLUS_AUTHOR			= 0x02,
+	FR_TAC_PLUS_ACCT			= 0x03,
+	FR_TAC_PLUS_MAX				= 0x04
 } fr_tacacs_type_t;
 
-typedef enum {
+/*
+ * GCC doesn't support flag_enum (yet)
+ *
+ * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=81665
+ */
+DIAG_OFF(attributes)
+typedef enum CC_HINT(flag_enum) {
 	FR_TAC_PLUS_FLAGS_NONE			= 0x00,
 	FR_TAC_PLUS_UNENCRYPTED_FLAG		= 0x01,
 	FR_TAC_PLUS_SINGLE_CONNECT_FLAG		= 0x04
 } fr_tacacs_flags_t;
+DIAG_ON(attributes)
 
 typedef struct CC_HINT(__packed__) {
 	union {
@@ -254,6 +263,16 @@ typedef struct CC_HINT(__packed__) {
 	fr_tacacs_acct_reply_status_t	status:8;
 } fr_tacacs_packet_acct_reply_hdr_t;
 
+/*
+ * Technically the flexible array extensions aren't allowed
+ * but clang and GCC still seem to do the right thing.
+ *
+ * If this ever becomes an issue the code will need to be
+ * refactored.
+ */
+#ifdef __clang__
+DIAG_OFF(flexible-array-extensions)
+#endif
 typedef struct CC_HINT(__packed__) {
 	fr_tacacs_packet_hdr_t					hdr;
 	union {
@@ -266,31 +285,34 @@ typedef struct CC_HINT(__packed__) {
 		fr_tacacs_packet_acct_reply_hdr_t	acct_reply;
 	};
 } fr_tacacs_packet_t;
+#ifdef __clang__
+DIAG_ON(flexible-array-extensions)
+#endif
 
 typedef enum {
 	FR_TACACS_CODE_INVALID = 0,
 
 	FR_TACACS_CODE_AUTH_START		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_START,
-	FR_TACACS_CODE_AUTH_REPLY_PASS		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_PASS,
-	FR_TACACS_CODE_AUTH_REPLY_FAIL		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_FAIL,
-	FR_TACACS_CODE_AUTH_REPLY_GETDATA	= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETDATA,
-	FR_TACACS_CODE_AUTH_REPLY_GETUSER	= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETUSER,
-	FR_TACACS_CODE_AUTH_REPLY_GETPASS	= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_GETPASS,
-	FR_TACACS_CODE_AUTH_REPLY_RESTART	= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_RESTART,
-	FR_TACACS_CODE_AUTH_REPLY_ERROR		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_REPLY_ERROR,
+	FR_TACACS_CODE_AUTH_PASS		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_PASS,
+	FR_TACACS_CODE_AUTH_FAIL		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_FAIL,
+	FR_TACACS_CODE_AUTH_GETDATA		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETDATA,
+	FR_TACACS_CODE_AUTH_GETUSER		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETUSER,
+	FR_TACACS_CODE_AUTH_GETPASS		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_GETPASS,
+	FR_TACACS_CODE_AUTH_RESTART		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_RESTART,
+	FR_TACACS_CODE_AUTH_ERROR		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_ERROR,
 
 	FR_TACACS_CODE_AUTH_CONT		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_CONTINUE,
 	FR_TACACS_CODE_AUTH_CONT_ABORT		= FR_PACKET_TYPE_VALUE_AUTHENTICATION_CONTINUE_ABORT,
 
 	FR_TACACS_CODE_AUTZ_REQUEST		= FR_PACKET_TYPE_VALUE_AUTHORIZATION_REQUEST,
-	FR_TACACS_CODE_AUTZ_REPLY_PASS_ADD     	= FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_PASS_ADD,
-	FR_TACACS_CODE_AUTZ_REPLY_PASS_REPLACE	= FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_PASS_REPLACE,
-	FR_TACACS_CODE_AUTZ_REPLY_FAIL		= FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_FAIL,
-	FR_TACACS_CODE_AUTZ_REPLY_ERROR		= FR_PACKET_TYPE_VALUE_AUTHORIZATION_REPLY_ERROR,
+	FR_TACACS_CODE_AUTZ_PASS_ADD     	= FR_PACKET_TYPE_VALUE_AUTHORIZATION_PASS_ADD,
+	FR_TACACS_CODE_AUTZ_PASS_REPLACE	= FR_PACKET_TYPE_VALUE_AUTHORIZATION_PASS_REPLACE,
+	FR_TACACS_CODE_AUTZ_FAIL		= FR_PACKET_TYPE_VALUE_AUTHORIZATION_FAIL,
+	FR_TACACS_CODE_AUTZ_ERROR		= FR_PACKET_TYPE_VALUE_AUTHORIZATION_ERROR,
 
 	FR_TACACS_CODE_ACCT_REQUEST		= FR_PACKET_TYPE_VALUE_ACCOUNTING_REQUEST,
-	FR_TACACS_CODE_ACCT_REPLY_SUCCESS	= FR_PACKET_TYPE_VALUE_ACCOUNTING_REPLY_SUCCESS,
-	FR_TACACS_CODE_ACCT_REPLY_ERROR		= FR_PACKET_TYPE_VALUE_ACCOUNTING_REPLY_ERROR,
+	FR_TACACS_CODE_ACCT_SUCCESS		= FR_PACKET_TYPE_VALUE_ACCOUNTING_SUCCESS,
+	FR_TACACS_CODE_ACCT_ERROR		= FR_PACKET_TYPE_VALUE_ACCOUNTING_ERROR,
 
 	FR_TACACS_CODE_MAX = 19,
 } fr_tacacs_packet_code_t;
@@ -315,8 +337,8 @@ ssize_t		fr_tacacs_encode(fr_dbuff_t *dbuff, uint8_t const *original, char const
 int		fr_tacacs_code_to_packet(fr_tacacs_packet_t *pkt, uint32_t code);
 
 /* decode.c */
-ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, uint8_t const *buffer, size_t buffer_len,
-			 UNUSED const uint8_t *original, char const * const secret, size_t secret_len);
+ssize_t fr_tacacs_decode(TALLOC_CTX *ctx, fr_pair_list_t *out, fr_dict_attr_t const *vendor, uint8_t const *buffer, size_t buffer_len,
+			 UNUSED const uint8_t *original, char const * const secret, size_t secret_len, int *code);
 
 int		fr_tacacs_packet_to_code(fr_tacacs_packet_t const *pkt);
 
@@ -327,7 +349,7 @@ int		fr_tacacs_init(void);
 
 void		fr_tacacs_free(void);
 
-int fr_tacacs_body_xor(fr_tacacs_packet_t const *pkt, uint8_t *body, size_t body_len, char const *secret, size_t secret_len);
+int		fr_tacacs_body_xor(fr_tacacs_packet_t const *pkt, uint8_t *body, size_t body_len, char const *secret, size_t secret_len) CC_HINT(nonnull(1,2,4));
 
 #define fr_tacacs_packet_log_hex(_log, _packet) _fr_tacacs_packet_log_hex(_log, _packet, __FILE__, __LINE__);
 void		_fr_tacacs_packet_log_hex(fr_log_t const *log, fr_tacacs_packet_t const *packet, char const *file, int line) CC_HINT(nonnull);

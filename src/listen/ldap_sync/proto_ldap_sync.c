@@ -228,7 +228,7 @@ static ssize_t mod_encode(UNUSED void const *instance, request_t *request, uint8
 	}
 
 send:
-	fr_internal_encode_list(&dbuff, &pairs, NULL);
+	if (fr_internal_encode_list(&dbuff, &pairs, NULL) < 0) goto error;
 	talloc_free(local);
 
 	return fr_dbuff_used(&dbuff);
@@ -286,10 +286,11 @@ static int mod_instantiate(module_inst_ctx_t const *mctx)
 	 	/* Strict rules for the update map as it's processed with limited functionality */
 		.attr = {
 			.dict_def = dict_ldap_sync,
+			.list_def = request_attr_request,
 			.allow_foreign = false,
 			.allow_unknown = false,
 			.allow_unresolved = false,
-			.disallow_qualifiers = true,
+			.list_presence = TMPL_ATTR_LIST_FORBID,
 		}
 	};
 

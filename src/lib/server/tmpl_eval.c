@@ -86,97 +86,38 @@ static fr_dict_attr_autoload_t tmpl_dict_attr[] = {
 	{ NULL }
 };
 
-/** Resolve a #tmpl_t into an #fr_pair_t
- *
- * @param[in] request containing the target lists.
- * @param[in] vpt tmpl to resolve
- * @return a pointer to the list in the #request_t.
- *
- * @This is just a temporary hack.
- */
-fr_pair_t *tmpl_get_list(request_t *request, tmpl_t const *vpt)
-{
-	tmpl_pair_list_t list;
 
-	if (!request) return NULL;
-
-	if (vpt->rules.attr.list_as_attr) {
-		fr_dict_attr_t const *da;
-		da = ((tmpl_attr_t *)tmpl_attr_list_head(&vpt->data.attribute.ar))->ar_da;
-
-		if (da == request_attr_request) return request->pair_list.request;
-		if (da == request_attr_reply) return request->pair_list.reply;
-		if (da == request_attr_control) return request->pair_list.control;
-		if (da == request_attr_state) return request->pair_list.state;
-
-		return NULL;
-	}
-
-	list = tmpl_list(vpt);
-
-	switch (list) {
-	/* Don't add default */
-	case PAIR_LIST_UNKNOWN:
-		break;
-
-	case PAIR_LIST_REQUEST:
-		return request->pair_list.request;
-
-	case PAIR_LIST_REPLY:
-		return request->pair_list.reply;
-
-	case PAIR_LIST_CONTROL:
-		return request->pair_list.control;
-
-	case PAIR_LIST_STATE:
-		return request->pair_list.state;
-	}
-
-	RWDEBUG2("List \"%s\" is not available",
-		fr_table_str_by_value(pair_list_table, list, "<INVALID>"));
-
-	return NULL;
-}
-
-
-/** Resolve attribute #pair_list_t value to an attribute list.
+/** Resolve attribute #fr_pair_list_t value to an attribute list.
  *
  * The value returned is a pointer to the pointer of the HEAD of a #fr_pair_t list in the
  * #request_t. If the head of the list changes, the pointer will still be valid.
  *
  * @param[in] request containing the target lists.
- * @param[in] list #pair_list_t value to resolve to #fr_pair_t list. Will be NULL if list
+ * @param[in] list #fr_pair_list_t value to resolve to #fr_pair_t list. Will be NULL if list
  *	name couldn't be resolved.
  * @return a pointer to the HEAD of a list in the #request_t.
  *
  * @see tmpl_dcursor_init
  */
-fr_pair_list_t *tmpl_list_head(request_t *request, tmpl_pair_list_t list)
+fr_pair_list_t *tmpl_list_head(request_t *request, fr_dict_attr_t const *list)
 {
 	if (!request) return NULL;
 
-	switch (list) {
-	/* Don't add default */
-	case PAIR_LIST_UNKNOWN:
-		break;
-
-	case PAIR_LIST_REQUEST:
+	if (list == request_attr_request) {
 		if (!request->packet) return NULL;
 		return &request->request_pairs;
-
-	case PAIR_LIST_REPLY:
-		if (!request->reply) return NULL;
-		return &request->reply_pairs;
-
-	case PAIR_LIST_CONTROL:
-		return &request->control_pairs;
-
-	case PAIR_LIST_STATE:
-		return &request->session_state_pairs;
 	}
 
-	RWDEBUG2("List \"%s\" is not available",
-		fr_table_str_by_value(pair_list_table, list, "<INVALID>"));
+	if (list == request_attr_reply) {
+		if (!request->reply) return NULL;
+		return &request->reply_pairs;
+	}
+
+	if (list == request_attr_control) return &request->control_pairs;
+
+	if (list == request_attr_state) return &request->session_state_pairs;
+
+	RWDEBUG2("List \"%s\" is not available", tmpl_list_name(list, "<INVALID>"));
 
 	return NULL;
 }
@@ -189,34 +130,24 @@ fr_pair_list_t *tmpl_list_head(request_t *request, tmpl_pair_list_t list)
  * freed too.
  *
  * @param[in] request containing the target lists.
- * @param[in] list #pair_list_t value to resolve to TALLOC_CTX.
+ * @param[in] list #fr_pair_list_t value to resolve to TALLOC_CTX.
  * @return
  *	- TALLOC_CTX on success.
  *	- NULL on failure.
  *
  * @see tmpl_pair_list
  */
-TALLOC_CTX *tmpl_list_ctx(request_t *request, tmpl_pair_list_t list)
+TALLOC_CTX *tmpl_list_ctx(request_t *request, fr_dict_attr_t const *list)
 {
 	if (!request) return NULL;
 
-	switch (list) {
-	case PAIR_LIST_REQUEST:
-		return request->request_ctx;
+	if (list == request_attr_request) return request->request_ctx;
 
-	case PAIR_LIST_REPLY:
-		return request->reply_ctx;
+	if (list == request_attr_reply) return request->reply_ctx;
 
-	case PAIR_LIST_CONTROL:
-		return request->control_ctx;
+	if (list == request_attr_control) return request->control_ctx;
 
-	case PAIR_LIST_STATE:
-		return request->session_state_ctx;
-
-	/* Don't add default */
-	case PAIR_LIST_UNKNOWN:
-		break;
-	}
+	if (list == request_attr_state) return request->session_state_ctx;
 
 	return NULL;
 }
@@ -227,28 +158,18 @@ TALLOC_CTX *tmpl_list_ctx(request_t *request, tmpl_pair_list_t list)
  * for the current #request_t.
  *
  * @param[in] request To resolve list in.
- * @param[in] list #pair_list_t value to resolve to #fr_radius_packet_t.
+ * @param[in] list #fr_pair_list_t value to resolve to #fr_radius_packet_t.
  * @return
  *	- #fr_radius_packet_t on success.
  *	- NULL on failure.
  *
  * @see tmpl_pair_list
  */
-fr_radius_packet_t *tmpl_packet_ptr(request_t *request, tmpl_pair_list_t list)
+fr_radius_packet_t *tmpl_packet_ptr(request_t *request, fr_dict_attr_t const *list)
 {
-	switch (list) {
-	/* Don't add default */
-	case PAIR_LIST_STATE:
-	case PAIR_LIST_CONTROL:
-	case PAIR_LIST_UNKNOWN:
-		return NULL;
+	if (list == request_attr_request) return request->packet;
 
-	case PAIR_LIST_REQUEST:
-		return request->packet;
-
-	case PAIR_LIST_REPLY:
-		return request->reply;
-	}
+	if (list == request_attr_reply) return request->reply;
 
 	return NULL;
 }
@@ -402,7 +323,6 @@ ssize_t _tmpl_to_type(void *out,
 
 	TMPL_VERIFY(vpt);
 
-	fr_assert(!tmpl_is_list(vpt));
 	fr_assert(!buff || (bufflen >= 2));
 
 	switch (vpt->type) {
@@ -483,7 +403,6 @@ ssize_t _tmpl_to_type(void *out,
 	 */
 	case TMPL_TYPE_UNINITIALISED:
 	case TMPL_TYPE_NULL:
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_EXEC_UNRESOLVED:
 	case TMPL_TYPE_ATTR_UNRESOLVED:
 	case TMPL_TYPE_XLAT_UNRESOLVED:
@@ -815,7 +734,6 @@ ssize_t _tmpl_to_atype(TALLOC_CTX *ctx, void *out,
 	 */
 	case TMPL_TYPE_UNINITIALISED:
 	case TMPL_TYPE_NULL:
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_EXEC_UNRESOLVED:
 	case TMPL_TYPE_REGEX:
 	case TMPL_TYPE_REGEX_UNCOMPILED:
@@ -891,7 +809,6 @@ ssize_t _tmpl_to_atype(TALLOC_CTX *ctx, void *out,
  * @param request The current #request_t.
  * @param vpt specifying the #fr_pair_t type or list to copy.
  *	Must be one of the following types:
- *	- #TMPL_TYPE_LIST
  *	- #TMPL_TYPE_ATTR
  * @return
  *	- -1 if no matching #fr_pair_t could be found.
@@ -908,7 +825,7 @@ int tmpl_copy_pairs(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *request, tm
 
 	TMPL_VERIFY(vpt);
 
-	fr_assert(tmpl_is_attr(vpt) || tmpl_is_list(vpt));
+	fr_assert(tmpl_is_attr(vpt));
 
 	for (vp = tmpl_dcursor_init(&err, NULL, &cc, &from, request, vpt);
 	     vp;
@@ -935,7 +852,6 @@ int tmpl_copy_pairs(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *request, tm
  * @param request The current #request_t.
  * @param vpt specifying the #fr_pair_t type or list to copy.
  *	Must be one of the following types:
- *	- #TMPL_TYPE_LIST
  *	- #TMPL_TYPE_ATTR
  * @return
  *	- -1 if no matching #fr_pair_t could be found.
@@ -952,7 +868,7 @@ int tmpl_copy_pair_children(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *req
 
 	TMPL_VERIFY(vpt);
 
-	fr_assert(tmpl_is_attr(vpt) || tmpl_is_list(vpt));
+	fr_assert(tmpl_is_attr(vpt));
 
 	fr_pair_list_free(out);
 
@@ -984,7 +900,6 @@ done:
  * @param[in] request The current #request_t.
  * @param[in] vpt specifying the #fr_pair_t type to find.
  *	Must be one of the following types:
- *	- #TMPL_TYPE_LIST
  *	- #TMPL_TYPE_ATTR
  * @return
  *	- 0 on success (found matching #fr_pair_t).
@@ -1074,11 +989,12 @@ int tmpl_find_or_add_vp(fr_pair_t **out, request_t *request, tmpl_t const *vpt)
  * @param[out] out	Leaf pair we allocated.
  * @param[in] list	to insert into.
  * @param[in] vpt	tmpl representing the attribute to add.
+ * @param[in] skip_list	skip list attr ref at the head of the tmpl.
  * @return
  *	- 0 on success.
  *	- -1 on failure.
  */
-int pair_append_by_tmpl_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t *list, tmpl_t const *vpt)
+int pair_append_by_tmpl_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t *list, tmpl_t const *vpt, bool skip_list)
 {
 	fr_pair_t			*vp = NULL;
 	TALLOC_CTX			*pair_ctx = ctx;
@@ -1093,6 +1009,8 @@ int pair_append_by_tmpl_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t 
 
 	leaf = tmpl_attr_list_tail(ar_list);
 	ar = tmpl_attr_list_head(ar_list);
+	if (!ar) goto error;
+	if (skip_list && tmpl_attr_is_list_attr(ar)) ar = tmpl_attr_list_next(ar_list, ar);
 
 	/*
 	 *	Walk down the tmpl ar stack looking for candidate parent
@@ -1139,7 +1057,7 @@ int pair_append_by_tmpl_parent(TALLOC_CTX *ctx, fr_pair_t **out, fr_pair_list_t 
  *	- <0 for "cast failed"
  *	- 0 for success
  */
-int tmpl_value_list_insert_tail(FR_DLIST_HEAD(fr_value_box_list) *list, fr_value_box_t *box, tmpl_t const *vpt)
+int tmpl_value_list_insert_tail(fr_value_box_list_t *list, fr_value_box_t *box, tmpl_t const *vpt)
 {
 	if (fr_type_is_null(tmpl_rules_cast(vpt)) ||
 	    (box->type == tmpl_rules_cast(vpt))) {
@@ -1167,12 +1085,12 @@ int tmpl_value_list_insert_tail(FR_DLIST_HEAD(fr_value_box_list) *list, fr_value
  *	- <0	on memory allocation errors.
  *	- 0	success.
  */
-static int tmpl_eval_pair_virtual(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out,
+static int tmpl_eval_pair_virtual(TALLOC_CTX *ctx, fr_value_box_list_t *out,
 				  request_t *request, tmpl_t const *vpt)
 {
 	fr_radius_packet_t *packet = NULL;
 	fr_value_box_t	*value;
-	FR_DLIST_HEAD(fr_value_box_list) list;
+	fr_value_box_list_t list;
 
 	/*
 	 *	Virtual attributes always have a count of 1
@@ -1187,7 +1105,7 @@ static int tmpl_eval_pair_virtual(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_li
 	 *	Some non-packet expansions
 	 */
 	if (tmpl_attr_tail_da(vpt) == attr_client_shortname) {
-		RADCLIENT *client = client_from_request(request);
+		fr_client_t *client = client_from_request(request);
 		if (!client || !client->shortname) return 0;
 
 		MEM(value = fr_value_box_alloc_null(ctx));
@@ -1248,7 +1166,7 @@ static int tmpl_eval_pair_virtual(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_li
 		fr_value_box_memdup(ctx, value, tmpl_attr_tail_da(vpt), packet->vector, sizeof(packet->vector), true);
 
 	} else if (tmpl_attr_tail_da(vpt) == attr_client_ip_address) {
-		RADCLIENT *client = client_from_request(request);
+		fr_client_t *client = client_from_request(request);
 		if (client) {
 			MEM(value = fr_value_box_alloc_null(ctx));
 			fr_value_box_ipaddr(value, NULL, &client->ipaddr, false);	/* Enum might not match type */
@@ -1326,7 +1244,7 @@ done:
  *	- <0		we failed getting a value for the attribute.
  *	- 0		we successfully evaluated the tmpl
  */
-int tmpl_eval_pair(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, request_t *request, tmpl_t const *vpt)
+int tmpl_eval_pair(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *request, tmpl_t const *vpt)
 {
 	fr_pair_t		*vp = NULL;
 	fr_value_box_t		*value;
@@ -1335,9 +1253,9 @@ int tmpl_eval_pair(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, reque
 	tmpl_dcursor_ctx_t	cc;
 
 	int			ret = 0;
-	FR_DLIST_HEAD(fr_value_box_list)	list;
+	fr_value_box_list_t	list;
 
-	fr_assert(tmpl_is_attr(vpt) || tmpl_is_list(vpt));
+	fr_assert(tmpl_is_attr(vpt));
 
 	fr_value_box_list_init(&list);
 
@@ -1471,11 +1389,11 @@ fail:
  *	- <0		we failed getting a value for the tmpl
  *	- 0		we successfully evaluated the tmpl
  */
-int tmpl_eval(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, request_t *request, tmpl_t const *vpt)
+int tmpl_eval(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *request, tmpl_t const *vpt)
 {
 	char *p;
 	fr_value_box_t		*value;
-	FR_DLIST_HEAD(fr_value_box_list)	list;
+	fr_value_box_list_t	list;
 
 	if (tmpl_needs_resolving(vpt)) {
 		fr_strerror_const("Cannot evaluate unresolved tmpl");
@@ -1492,7 +1410,7 @@ int tmpl_eval(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, request_t 
 		return -1;
 	}
 
-	if (tmpl_is_attr(vpt) || tmpl_is_list(vpt)) {
+	if (tmpl_is_attr(vpt)) {
 		return tmpl_eval_pair(ctx, out, request, vpt);
 	}
 
@@ -1547,7 +1465,7 @@ done:
  *	- <0		the cast failed
  *	- 0		we successfully evaluated the tmpl
  */
-int tmpl_eval_cast(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *list, tmpl_t const *vpt)
+int tmpl_eval_cast(TALLOC_CTX *ctx, fr_value_box_list_t *list, tmpl_t const *vpt)
 {
 	fr_type_t cast = tmpl_rules_cast(vpt);
 	fr_value_box_t *vb;

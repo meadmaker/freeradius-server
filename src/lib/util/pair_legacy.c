@@ -16,7 +16,7 @@
 
 /** AVP manipulation and search API
  *
- * @file src/lib/util/pair.c
+ * @file src/lib/util/pair_legacy.c
  *
  * @copyright 2000,2006,2015 The FreeRADIUS server project
  */
@@ -31,6 +31,18 @@ RCSID("$Id$")
 
 #include <freeradius-devel/protocol/radius/rfc2865.h>
 #include <freeradius-devel/protocol/freeradius/freeradius.internal.h>
+
+/** A fr_pair_t in string format.
+ *
+ * Used to represent pairs in the legacy 'users' file format.
+ */
+typedef struct {
+	char r_opand[1024];					//!< Right hand side of the pair.
+
+	fr_token_t quote;					//!< Type of quoting around the r_opand.
+
+	fr_token_t op;						//!< Operator.
+} fr_pair_t_RAW;
 
 
 static fr_sbuff_term_t const 	bareword_terminals =
@@ -180,14 +192,6 @@ static ssize_t fr_pair_list_afrom_substr(TALLOC_CTX *ctx, fr_dict_attr_t const *
 
 		next = p + slen;
 
-		if ((size_t) (next - p) >= sizeof(raw.l_opand)) {
-			fr_dict_unknown_free(&da);
-			fr_strerror_const("Attribute name too long");
-			goto error;
-		}
-
-		memcpy(raw.l_opand, p, next - p);
-		raw.l_opand[next - p] = '\0';
 		raw.r_opand[0] = '\0';
 
 		p = next;

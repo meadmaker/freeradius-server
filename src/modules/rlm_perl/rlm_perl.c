@@ -29,6 +29,8 @@ RCSID("$Id$")
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
+#include <freeradius-devel/unlang/xlat.h>
 #include <freeradius-devel/radius/radius.h>
 
 DIAG_OFF(DIAG_UNKNOWN_PRAGMAS)
@@ -67,8 +69,6 @@ typedef struct {
 	char const	*func_authorize;
 	char const	*func_authenticate;
 	char const	*func_accounting;
-	char const	*func_start_accounting;
-	char const	*func_stop_accounting;
 	char const	*func_preacct;
 	char const	*func_detach;
 	char const	*func_post_auth;
@@ -103,32 +103,7 @@ static const CONF_PARSER module_config[] = {
 
 	{ FR_CONF_OFFSET("perl_flags", FR_TYPE_STRING, rlm_perl_t, perl_flags) },
 
-	{ FR_CONF_OFFSET("func_start_accounting", FR_TYPE_STRING, rlm_perl_t, func_start_accounting) },
-
-	{ FR_CONF_OFFSET("func_stop_accounting", FR_TYPE_STRING, rlm_perl_t, func_stop_accounting) },
 	CONF_PARSER_TERMINATOR
-};
-
-static fr_dict_t const *dict_radius;
-
-extern fr_dict_autoload_t rlm_perl_dict[];
-fr_dict_autoload_t rlm_perl_dict[] = {
-	{ .out = &dict_radius, .proto = "radius" },
-	{ NULL }
-};
-
-static fr_dict_attr_t const *attr_acct_status_type;
-static fr_dict_attr_t const *attr_chap_password;
-static fr_dict_attr_t const *attr_user_name;
-static fr_dict_attr_t const *attr_user_password;
-
-extern fr_dict_attr_autoload_t rlm_perl_dict_attr[];
-fr_dict_attr_autoload_t rlm_perl_dict_attr[] = {
-	{ .out = &attr_acct_status_type, .name = "Acct-Status-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius },
-	{ .out = &attr_chap_password, .name = "CHAP-Password", .type = FR_TYPE_OCTETS, .dict = &dict_radius },
-	{ .out = &attr_user_name, .name = "User-Name", .type = FR_TYPE_STRING, .dict = &dict_radius },
-	{ .out = &attr_user_password, .name = "User-Password", .type = FR_TYPE_STRING, .dict = &dict_radius },
-	{ NULL }
 };
 
 /*
@@ -278,7 +253,7 @@ static void xs_init(pTHX)
  * 	- 0 on success
  * 	- -1 on failure
  */
-static int perl_vblist_to_av(AV *av, FR_DLIST_HEAD(fr_value_box_list) *head) {
+static int perl_vblist_to_av(AV *av, fr_value_box_list_t *head) {
 	fr_value_box_t	*vb = NULL;
 	SV		*sv;
 
@@ -332,7 +307,7 @@ static int perl_vblist_to_av(AV *av, FR_DLIST_HEAD(fr_value_box_list) *head) {
  * 	- 0 on success
  * 	- -1 on failure
  */
-static int perl_sv_to_vblist(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *list, request_t *request, SV *sv) {
+static int perl_sv_to_vblist(TALLOC_CTX *ctx, fr_value_box_list_t *list, request_t *request, SV *sv) {
 	fr_value_box_t	*vb = NULL;
 	char		*tmp;
 	STRLEN		len;
@@ -438,7 +413,7 @@ static int perl_sv_to_vblist(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *
 
 static xlat_arg_parser_t const perl_xlat_args[] = {
 	{ .required = true, .single = true, .type = FR_TYPE_STRING },
-	{ .variadic = true, .type = FR_TYPE_VOID },
+	{ .variadic = XLAT_ARG_VARIADIC_EMPTY_KEEP, .type = FR_TYPE_VOID },
 	XLAT_ARG_PARSER_TERMINATOR
 };
 
@@ -448,17 +423,17 @@ static xlat_arg_parser_t const perl_xlat_args[] = {
  */
 static xlat_action_t perl_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx,
-			       request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			       request_t *request, fr_value_box_list_t *in)
 {
 	rlm_perl_thread_t const		*t = talloc_get_type_abort_const(xctx->mctx->thread, rlm_perl_thread_t);
 	int				count, i;
 	xlat_action_t			ret = XLAT_ACTION_FAIL;
 	STRLEN				n_a;
 	fr_value_box_t			*func = fr_value_box_list_pop_head(in);
-	fr_value_box_t			*arg = NULL, *child;
+	fr_value_box_t			*child;
 	SV				*sv;
 	AV				*av;
-	FR_DLIST_HEAD(fr_value_box_list)		list, sub_list;
+	fr_value_box_list_t		list, sub_list;
 	fr_value_box_t			*vb = NULL;
 
 	fr_value_box_list_init(&list);
@@ -475,7 +450,7 @@ static xlat_action_t perl_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 
 		PUSHMARK(SP);
 
-		while ((arg = fr_value_box_list_next(in, arg))) {
+		fr_value_box_list_foreach(in, arg) {
 			fr_assert(arg->type == FR_TYPE_GROUP);
 			if (fr_value_box_list_empty(&arg->vb_group)) continue;
 
@@ -607,8 +582,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
 	xlat_t		*xlat;
 
-	xlat = xlat_register_module(NULL, mctx, mctx->inst->name, perl_xlat, FR_TYPE_VOID, NULL);
-	xlat_func_args(xlat, perl_xlat_args);
+	xlat = xlat_func_register_module(NULL, mctx, mctx->inst->name, perl_xlat, FR_TYPE_VOID);
+	xlat_func_args_set(xlat, perl_xlat_args);
 
 	return 0;
 }
@@ -935,50 +910,7 @@ RLM_PERL_FUNC(authorize)
 RLM_PERL_FUNC(authenticate)
 RLM_PERL_FUNC(post_auth)
 RLM_PERL_FUNC(preacct)
-
-/*
- *	Write accounting information to this modules database.
- */
-static unlang_action_t CC_HINT(nonnull) mod_accounting(rlm_rcode_t *p_result, module_ctx_t const *mctx, request_t *request)
-{
-	rlm_perl_t	 	*inst = talloc_get_type_abort(mctx->inst->data, rlm_perl_t);
-	fr_pair_t		*pair;
-	int 			acct_status_type = 0;
-	char const		*func;
-
-	pair = fr_pair_find_by_da(&request->request_pairs, NULL, attr_acct_status_type);
-	if (pair != NULL) {
-		acct_status_type = pair->vp_uint32;
-	} else {
-		REDEBUG("Invalid Accounting Packet");
-		RETURN_MODULE_INVALID;
-	}
-
-	switch (acct_status_type) {
-	case FR_STATUS_START:
-		if (inst->func_start_accounting) {
-			func = inst->func_start_accounting;
-		} else {
-			func = inst->func_accounting;
-		}
-		break;
-
-	case FR_STATUS_STOP:
-		if (inst->func_stop_accounting) {
-			func = inst->func_stop_accounting;
-		} else {
-			func = inst->func_accounting;
-		}
-		break;
-
-	default:
-		func = inst->func_accounting;
-		break;
-	}
-
-	return do_perl(p_result, mctx, request,
-		       ((rlm_perl_thread_t *)talloc_get_type_abort(mctx->thread, rlm_perl_thread_t))->perl, func);
-}
+RLM_PERL_FUNC(accounting)
 
 DIAG_OFF(DIAG_UNKNOWN_PRAGMAS)
 DIAG_OFF(shadow)

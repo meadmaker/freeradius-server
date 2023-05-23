@@ -152,6 +152,7 @@
 #include <freeradius-devel/util/fifo.h>
 #include <freeradius-devel/util/misc.h>
 #include <freeradius-devel/util/rand.h>
+#include <freeradius-devel/util/time.h>
 
 #include "base.h"
 #include "cluster.h"
@@ -469,7 +470,7 @@ static fr_redis_cluster_rcode_t cluster_node_conf_from_redirect(uint16_t *key_sl
 	}
 	p++;			/* Skip the ' ' */
 
-	if (fr_inet_pton_port(&ipaddr, &port, p, redirect->len - (p - redirect->str), AF_UNSPEC, false, true) < 0) {
+	if (fr_inet_pton_port(&ipaddr, &port, p, redirect->len - (p - redirect->str), AF_UNSPEC, true, true) < 0) {
 		return FR_REDIS_CLUSTER_RCODE_BAD_INPUT;
 	}
 	fr_assert(ipaddr.af);
@@ -535,14 +536,14 @@ static fr_redis_cluster_rcode_t cluster_map_apply(fr_redis_cluster_t *cluster, r
 #  define SET_ADDR(_addr, _map) \
 do { \
 	int _ret; \
-	_ret = fr_inet_pton(&_addr.inet.dst_ipaddr, _map->element[0]->str, _map->element[0]->len, AF_UNSPEC, false, true);\
+	_ret = fr_inet_pton(&_addr.inet.dst_ipaddr, _map->element[0]->str, _map->element[0]->len, AF_UNSPEC, true, true);\
 	fr_assert(_ret == 0);\
 	_addr.inet.dst_port = _map->element[1]->integer; \
 } while (0)
 #else
 #  define SET_ADDR(_addr, _map) \
 do { \
-	fr_inet_pton(&_addr.inet.dst_ipaddr, _map->element[0]->str, _map->element[0]->len, AF_UNSPEC, false, true);\
+	fr_inet_pton(&_addr.inet.dst_ipaddr, _map->element[0]->str, _map->element[0]->len, AF_UNSPEC, true, true);\
 	_addr.inet.dst_port = _map->element[1]->integer; \
 } while (0)
 #endif
@@ -1013,7 +1014,7 @@ fr_redis_cluster_rcode_t fr_redis_cluster_remap(request_t *request, fr_redis_clu
 	 *	The remap times are _our_ times, not the _request_ time.
 	 */
 	now = fr_time();
-	if (fr_time_eq(now, cluster->last_updated)) {
+	if (fr_time_to_sec(now) == fr_time_to_sec(cluster->last_updated)) {
 	too_soon:
 		ROPTIONAL(RWARN, WARN, "Cluster was updated less than a second ago, ignoring remap request");
 		return FR_REDIS_CLUSTER_RCODE_IGNORED;
@@ -1074,7 +1075,7 @@ fr_redis_cluster_rcode_t fr_redis_cluster_remap(request_t *request, fr_redis_clu
 		fr_redis_reply_free(&map);	/* Free the map */
 		goto in_progress;
 	}
-	if (fr_time_eq(now, cluster->last_updated)) {
+	if (fr_time_to_sec(now) == fr_time_to_sec(cluster->last_updated)) {
 		pthread_mutex_unlock(&cluster->mutex);
 		fr_redis_reply_free(&map);	/* Free the map */
 		goto too_soon;
@@ -1936,7 +1937,7 @@ fr_redis_rcode_t fr_redis_cluster_state_next(fr_redis_cluster_state_t *state, fr
 			if (cluster_node_find_live(&state->node, conn, request,
 						   cluster, state->node) < 0) return REDIS_RCODE_RECONNECT;
 
-			return REDIS_RCODE_TRY_AGAIN;
+			goto try_again;
 		}
 
 		state->retries = 0;

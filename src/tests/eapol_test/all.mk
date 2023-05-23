@@ -60,9 +60,25 @@ EAPOL_OK_FILES	 := $(patsubst $(DIR)/%.conf,$(OUTPUT)/%.ok,$(EAPOL_TEST_FILES))
 #
 define ADD_TEST_EAP
 test.eap.${1}: $(OUTPUT)/${1}.ok
+
+test.eap.help: TEST_EAP_HELP += test.eap.${1}
+
+ifeq "$(PACKAGE_TEST)" ""
+#
+#  Ensure that we run
+#
+$(OUTPUT)/${1}.ok:  $(patsubst %,rlm_eap_%.la,$(subst -,_,${1}))
+endif
+
 endef
 $(foreach x,$(patsubst $(DIR)/%.conf,%,$(EAPOL_TEST_FILES)),$(eval $(call ADD_TEST_EAP,$x)))
 
+ifeq "$(PACKAGE_TEST)" ""
+#
+#  The EAP-MSCHAPv2 module calls MSCHAP to do the dirty work.
+#
+$(OUTPUT)/mschapv2.ok: rlm_mschap.la
+endif
 
 #
 #  Generic rules to start / stop the radius service.
@@ -71,7 +87,7 @@ include src/tests/radiusd.mk
 
 define ADD_TEST_EAP_OUTPUT
 $(OUTPUT)/${1}:
-	$(Q)mkdir -p $$@
+	${Q}mkdir -p $$@
 endef
 
 #
@@ -126,6 +142,9 @@ $(OUTPUT)/%.ok: $(DIR)/%.conf $(if $(POST_INSTALL_MAKEFILE_ARG),,$(BUILD_DIR)/li
 
 $(TEST): $(EAPOL_OK_FILES)
 	@touch $(BUILD_DIR)/tests/$@
+
+$(TEST).help:
+	@echo make $(TEST_EAP_HELP)
 
 else
 $(BUILD_DIR)/tests/eapol_test:

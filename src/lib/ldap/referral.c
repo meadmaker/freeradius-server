@@ -40,6 +40,7 @@ static int _fr_ldap_referral_free(fr_ldap_referral_t *referral)
 /** Allocate a new structure to handle an LDAP referral, setting the destructor
  *
  * @param[in] ctx	to allocate the referral in
+ * @param[in] request	the LDAP query relates to.
  * @return
  *	- a new referral structure on success
  *	- NULL on failure
@@ -67,6 +68,7 @@ static void _ldap_referral_send(UNUSED fr_trunk_t *trunk, UNUSED fr_trunk_state_
 {
 	fr_ldap_referral_t	*referral = talloc_get_type_abort(uctx, fr_ldap_referral_t);
 	fr_ldap_query_t		*query = referral->query;
+	request_t		*request = referral->request;
 
 	/*
 	 *	If referral is set, then another LDAP trunk has gone active first and sent the referral
@@ -77,10 +79,19 @@ static void _ldap_referral_send(UNUSED fr_trunk_t *trunk, UNUSED fr_trunk_state_
 	 *	Enqueue referral query on active trunk connection
 	 */
 	query->referral = referral;
-	query->treq = fr_trunk_request_alloc(referral->ttrunk->trunk, referral->request);
-	fr_trunk_request_enqueue(&query->treq, referral->ttrunk->trunk, NULL, query, NULL);
+	switch (fr_trunk_request_enqueue(&query->treq, referral->ttrunk->trunk, request, query, NULL)) {
+	case FR_TRUNK_ENQUEUE_OK:
+	case FR_TRUNK_ENQUEUE_IN_BACKLOG:
+		break;
 
-	DEBUG3("Pending LDAP referral query queued on active trunk");
+	default:
+		ROPTIONAL(RERROR, ERROR, "Failed enqueueing pending LDAP referral");
+		query->ret = LDAP_RESULT_ERROR;
+		if (request) unlang_interpret_mark_runnable(request);
+		return;
+	}
+
+	ROPTIONAL(RDEBUG3, DEBUG3, "Pending LDAP referral query queued on active trunk");
 }
 
 
@@ -90,7 +101,9 @@ static void _ldap_referral_send(UNUSED fr_trunk_t *trunk, UNUSED fr_trunk_state_
  * We check all the possible referrals and look for one where there already
  * is an active trunk connection.
  *
- * @param query	whose result was one or more referral URLs
+ * @param t		Thread running the query.
+ * @param request	related to the query.
+ * @param query		whose result was one or more referral URLs.
  * @return
  * 	- 0 on success.
  * 	- < 0 on failure.
@@ -102,12 +115,6 @@ int fr_ldap_referral_follow(fr_ldap_thread_t *t, request_t *request, fr_ldap_que
 	int			referral_no = -1;
 	fr_ldap_referral_t	*referral;
 
-	/*
-	 *	In following a referral, firstly remove the query from the
-	 *	tree of pending queries clear the message id.
-	 */
-	fr_rb_remove(query->ldap_conn->queries, query);
-	query->msgid = 0;
 	fr_trunk_request_signal_complete(query->treq);
 	query->treq = NULL;
 
@@ -227,8 +234,15 @@ int fr_ldap_referral_follow(fr_ldap_thread_t *t, request_t *request, fr_ldap_que
 		 *	We have an active trunk enqueue the request
 		 */
 		query->referral = referral;
-		query->treq = fr_trunk_request_alloc(ttrunk->trunk, request);
-		fr_trunk_request_enqueue(&query->treq, ttrunk->trunk, request, query, NULL);
+		switch (fr_trunk_request_enqueue(&query->treq, ttrunk->trunk, request, query, NULL)) {
+		case FR_TRUNK_ENQUEUE_OK:
+		case FR_TRUNK_ENQUEUE_IN_BACKLOG:
+			break;
+
+		default:
+			ROPTIONAL(RERROR, ERROR, "Failed to enqueue request for referral");
+			goto free_referral;
+		}
 		return 0;
 	}
 
@@ -274,7 +288,9 @@ int fr_ldap_referral_follow(fr_ldap_thread_t *t, request_t *request, fr_ldap_que
  * new trunks are launched with watchers to send the query on the first
  * active trunk.
  *
- * @param query whose referrals are being chased
+ * @param t		Thread running the query.
+ * @param request	the query relates to.
+ * @param query		whose referrals are being chased.
  * @return
  *	- 0 on success.
  *	- < 0 on failure.
@@ -284,6 +300,9 @@ int fr_ldap_referral_next(fr_ldap_thread_t *t, request_t *request, fr_ldap_query
 	fr_ldap_config_t	*config = t->config;
 	fr_ldap_referral_t	*referral = NULL;
 	fr_ldap_thread_trunk_t	*ttrunk;
+
+	fr_trunk_request_signal_complete(query->treq);
+	query->treq = NULL;
 
 	while ((referral = fr_dlist_next(&query->referrals, referral))) {
 		if (fr_thread_ldap_trunk_state(t, referral->host_uri,
@@ -306,8 +325,15 @@ int fr_ldap_referral_next(fr_ldap_thread_t *t, request_t *request, fr_ldap_query
 		 *	We have an active trunk enqueue the request
 		 */
 		query->referral = referral;
-		query->treq = fr_trunk_request_alloc(ttrunk->trunk, request);
-		fr_trunk_request_enqueue(&query->treq, ttrunk->trunk, request, query, NULL);
+		switch(fr_trunk_request_enqueue(&query->treq, ttrunk->trunk, request, query, NULL)) {
+		case FR_TRUNK_ENQUEUE_OK:
+		case FR_TRUNK_ENQUEUE_IN_BACKLOG:
+			break;
+
+		default:
+			ROPTIONAL(RERROR, ERROR, "Failed to enqueue request for referral");
+			continue;
+		}
 		return 0;
 	}
 

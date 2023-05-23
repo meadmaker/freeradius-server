@@ -47,7 +47,8 @@ int fr_ldap_map_getvalue(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reques
 	fr_pair_list_init(&head);
 	fr_pair_list_init(&tmp_list);
 
-	switch (map->lhs->type) {
+	fr_assert(map->lhs->type == TMPL_TYPE_ATTR);
+
 	/*
 	 *	This is a mapping in the form of:
 	 *		<list>. += <ldap attr>
@@ -59,10 +60,10 @@ int fr_ldap_map_getvalue(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reques
 	 *	RADIUS control and reply attributes in separate LDAP
 	 *	attributes.
 	 */
-	case TMPL_TYPE_LIST:
+	if (tmpl_is_list(map->lhs)) {
 		for (i = 0; i < self->count; i++) {
 			map_t	*attr = NULL;
-			char		*attr_str;
+			char	*attr_str;
 
 			tmpl_rules_t	lhs_rules = {
 				.attr = {
@@ -135,8 +136,8 @@ int fr_ldap_map_getvalue(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reques
 			if ((tmpl_list(attr->lhs) != tmpl_list(map->lhs))) {
 				RWDEBUG("valuepair \"%pV\" has conflicting list qualifier (%s vs %s), skipping...",
 					fr_box_strvalue_len(self->values[i]->bv_val, self->values[i]->bv_len),
-					fr_table_str_by_value(pair_list_table, tmpl_list(attr->lhs), "<INVALID>"),
-					fr_table_str_by_value(pair_list_table, tmpl_list(map->lhs), "<INVALID>"));
+					tmpl_list_name(tmpl_list(attr->lhs), "<INVALID>"),
+					tmpl_list_name(tmpl_list(map->lhs), "<INVALID>"));
 				goto next_pair;
 			}
 
@@ -154,42 +155,38 @@ int fr_ldap_map_getvalue(TALLOC_CTX *ctx, fr_pair_list_t *out, request_t *reques
 			 */
 			if (map->op != T_OP_ADD_EQ) break;
 		}
-		break;
+		goto finish;
+	}
 
 	/*
 	 *	Iterate over all the retrieved values,
 	 *	don't try and be clever about changing operators
 	 *	just use whatever was set in the attribute map.
 	 */
-	case TMPL_TYPE_ATTR:
-		for (i = 0; i < self->count; i++) {
-			if (!self->values[i]->bv_len) continue;
+	for (i = 0; i < self->count; i++) {
+		if (!self->values[i]->bv_len) continue;
 
-			MEM(vp = fr_pair_afrom_da(ctx, tmpl_attr_tail_da(map->lhs)));
+		MEM(vp = fr_pair_afrom_da(ctx, tmpl_attr_tail_da(map->lhs)));
 
-			if (fr_pair_value_from_str(vp, self->values[i]->bv_val,
-						   self->values[i]->bv_len, NULL, true) < 0) {
-				RPWDEBUG("Failed parsing value \"%pV\" for attribute %s",
-					 fr_box_strvalue_len(self->values[i]->bv_val, self->values[i]->bv_len),
-					 tmpl_attr_tail_da(map->lhs)->name);
+		if (fr_pair_value_from_str(vp, self->values[i]->bv_val,
+					   self->values[i]->bv_len, NULL, true) < 0) {
+			RPWDEBUG("Failed parsing value \"%pV\" for attribute %s",
+				 fr_box_strvalue_len(self->values[i]->bv_val, self->values[i]->bv_len),
+				 tmpl_attr_tail_da(map->lhs)->name);
 
-				talloc_free(vp); /* also frees escaped */
-				continue;
-			}
-
-			fr_pair_append(&head, vp);
-
-			/*
-			 *	Only process the first value, unless the operator is +=
-			 */
-			if (map->op != T_OP_ADD_EQ) break;
+			talloc_free(vp); /* also frees escaped */
+			continue;
 		}
-		break;
 
-	default:
-		fr_assert(0);
+		fr_pair_append(&head, vp);
+
+		/*
+		 *	Only process the first value, unless the operator is +=
+		 */
+		if (map->op != T_OP_ADD_EQ) break;
 	}
 
+finish:
 	fr_pair_list_append(out, &head);
 
 	return 0;
@@ -202,7 +199,6 @@ int fr_ldap_map_verify(map_t *map, UNUSED void *instance)
 	 *	create using LDAP values.
 	 */
 	switch (map->lhs->type) {
-	case TMPL_TYPE_LIST:
 	case TMPL_TYPE_ATTR:
 		break;
 
@@ -383,6 +379,7 @@ int fr_ldap_map_do(request_t *request,
 			tmpl_rules_t parse_rules = {
 				.attr = {
 					.dict_def = request->dict,
+					.list_def = request_attr_request,
 					.prefix = TMPL_ATTR_REF_PREFIX_AUTO
 				}
 			};

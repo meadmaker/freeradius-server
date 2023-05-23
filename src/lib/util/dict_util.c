@@ -529,6 +529,7 @@ int dict_attr_init(fr_dict_attr_t **da_p,
 
 	**da_p = (fr_dict_attr_t) {
 		.attr = attr,
+		.last_child_attr = (1 << 24),
 		.type = type,
 		.flags = *args->flags,
 		.parent = parent,
@@ -1076,6 +1077,12 @@ int dict_attr_child_add(fr_dict_attr_t *parent, fr_dict_attr_t *child)
 	}
 
 	/*
+	 *	The parent has children by name only, not by number.  Don't even bother trying to track
+	 *	numbers, except for VENDOR in root, and MEMBER of a struct.
+	 */
+	if (!parent->flags.is_root && parent->flags.name_only && (parent->type != FR_TYPE_STRUCT)) return 0;
+
+	/*
 	 *	We only allocate the pointer array *if* the parent has children.
 	 */
 	children = dict_attr_children(parent);
@@ -1373,6 +1380,11 @@ int dict_attr_enum_add_name(fr_dict_attr_t *da, char const *name,
 
 	if (fr_type_is_structural(da->type) || (da->type == FR_TYPE_STRING)) {
 		fr_strerror_printf("Enumeration names cannot be added for data type '%s'", fr_type_to_str(da->type));
+		return -1;
+	}
+
+	if (da->flags.is_alias) {
+		fr_strerror_printf("Enumeration names cannot be added for ALIAS '%s'", da->name);
 		return -1;
 	}
 
@@ -2313,6 +2325,7 @@ fr_dict_attr_t const *fr_dict_vendor_da_by_num(fr_dict_attr_t const *vendor_root
  * @param[out] err	Where to write error codes.  Any error
  *			other than FR_DICT_ATTR_NOTFOUND will
  *			prevent resolution from continuing.
+ * @param[out] out	Where to write resolved DA.
  * @param[in] parent	The dictionary root or other attribute to search from.
  * @param[in] in	Contains the string to resolve.
  * @param[in] tt	Terminal sequences to use to determine the portion
@@ -3198,6 +3211,7 @@ int dict_dependent_add(fr_dict_t *dict, char const *dependent)
  * be bound to the lifetime of an additional object.
  *
  * @param[in] dict	to increase the reference count for.
+ * @param[in] dependent	requesting the loading of the dictionary.
  * @return
  *	- 0 on success.
  *	- -1 on error.
@@ -3408,7 +3422,6 @@ fr_dict_t *dict_alloc(TALLOC_CTX *ctx)
 	 */
 	dict->default_type_size = 1;
 	dict->default_type_length = 1;
-	dict->self_allocated = (1 << 24);
 
 	return dict;
 }
@@ -3444,7 +3457,6 @@ fr_dict_t *fr_dict_protocol_alloc(fr_dict_t const *parent)
 	 */
 	dict->default_type_size = 2;
 	dict->default_type_length = 2;
-	dict->self_allocated = (1 << 24);
 
 	/*
 	 *	Allocate the root attribute.  This dictionary is
@@ -3616,6 +3628,7 @@ int fr_dict_attr_autoload(fr_dict_attr_autoload_t const *to_load)
 /** Process a dict_autoload element to load a protocol
  *
  * @param[in] to_load	dictionary definition.
+ * @param[in] dependent	that is loading this dictionary.
  * @return
  *	- 0 on success.
  *	- -1 on failure.
@@ -3651,6 +3664,7 @@ int _fr_dict_autoload(fr_dict_autoload_t const *to_load, char const *dependent)
 /** Decrement the reference count on a previously loaded dictionary
  *
  * @param[in] to_free	previously loaded dictionary to free.
+ * @param[in] dependent	that originally allocated this dictionary
  */
 int _fr_dict_autofree(fr_dict_autoload_t const *to_free, char const *dependent)
 {
@@ -4303,4 +4317,68 @@ bool fr_dict_attr_compatible(fr_dict_attr_t const *a, fr_dict_attr_t const *b)
 	if (ref) b = ref;
 
 	return (a == b);
+}
+
+/** See if a structural da is allowed to contain another da
+ *
+ *  We have some complex rules with different structural types,
+ *  different protocol dictionaries, references to other protocols,
+ *  etc.
+ *
+ *  @param[in] parent	The parent da, must be structural
+ *  @param[in] child	The alleged child
+ *  @return
+ *	- false - the child is not allowed to be contained by the parent
+ *	- true - the child is allowed to be contained by the parent
+ */
+bool fr_dict_attr_can_contain(fr_dict_attr_t const *parent, fr_dict_attr_t const *child)
+{
+	/*
+	 *	This is the common case: child is from the parent.
+	 */
+	if (child->parent == parent) return true;
+
+	/*
+	 *	Only structural types can have children.
+	 */
+	if (!fr_type_structural[parent->type]) return false;
+
+	/*
+	 *	An internal attribute can go into any other container.
+	 *
+	 *	Any other attribute can go into an internal structural
+	 *	attribute, because why not?
+	 */
+	if (dict_gctx) {
+		if (child->dict == dict_gctx->internal) return true;
+
+		if (parent->dict == dict_gctx->internal) return true;
+	}
+
+	/*
+	 *	Protocol attributes have to be in the same dictionary.
+	 *
+	 *	Unless they're a cross-protocol grouping attribute.
+	 *	In which case we check if the ref is the same.
+	 */
+	if (child->dict != parent->dict) {
+		fr_dict_attr_t const *ref;
+
+		ref = fr_dict_attr_ref(parent);
+		return (ref && (ref->dict == child->dict));
+	}
+
+	/*
+	 *	Key fields can have children, but everyone else thinks
+	 *	that the struct is the parent.  <sigh>
+	 */
+	if ((parent->type == FR_TYPE_STRUCT) && child->parent->parent == parent) return true;
+
+	/*
+	 *	We're in the same protocol dictionary, but the child
+	 *	isn't directly from the parent.  Therefore the only
+	 *	type of same-protocol structure it can go into is a
+	 *	group.
+	 */
+	return (parent->type == FR_TYPE_GROUP);
 }

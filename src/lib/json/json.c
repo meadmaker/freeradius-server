@@ -156,9 +156,9 @@ int fr_json_object_to_value_box(TALLOC_CTX *ctx, fr_value_box_t *out, json_objec
 		} else if (num > UINT16_MAX) {		/* 32bit unsigned */
 			fr_value_box(out, (uint32_t)num, tainted);
 		} else if (num > UINT8_MAX) {		/* 16bit unsigned */
-			fr_value_box(out, (int16_t)num, tainted);
+			fr_value_box(out, (uint16_t)num, tainted);
 		} else {				/* 8bit unsigned */
-			fr_value_box(out, (int8_t)num, tainted);
+			fr_value_box(out, (uint8_t)num, tainted);
 		}
 	}
 		break;
@@ -557,6 +557,13 @@ static json_object *json_object_afrom_pair_list(TALLOC_CTX *ctx, fr_pair_list_t 
 		struct json_object	*vp_object, *values, *value, *type_name;
 
 		if (vp->da->flags.is_raw) continue;
+
+		switch (vp->da->type) {
+		case FR_TYPE_LEAF:
+			break;
+		default:
+			continue;
+		}
 
 		/*
 		 *	Get attribute name and value.

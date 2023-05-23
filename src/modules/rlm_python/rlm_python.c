@@ -222,24 +222,21 @@ static void python_error_log(module_ctx_t const *mctx, request_t *request)
 			PyFrameObject *cur_frame = ptb->tb_frame;
 #if PY_VERSION_HEX >= 0x030A0000
 			PyCodeObject *code = PyFrame_GetCode(cur_frame);
-#endif
 
 			ROPTIONAL(RERROR, ERROR, "[%ld] %s:%d at %s()",
 				fnum,
-#if PY_VERSION_HEX >= 0x030A0000
 				PyUnicode_AsUTF8(code->co_filename),
-#else
-				PyUnicode_AsUTF8(cur_frame->f_code->co_filename),
-#endif
 				PyFrame_GetLineNumber(cur_frame),
-#if PY_VERSION_HEX >= 0x30A0000
 				PyUnicode_AsUTF8(code->co_name)
-#else
-				PyUnicode_AsUTF8(cur_frame->f_code->co_name)
-#endif
 			);
-#if PY_VERSION_HEX >= 0x030A0000
 			Py_XDECREF(code);
+#else
+			ROPTIONAL(RERROR, ERROR, "[%ld] %s:%d at %s()",
+				  fnum,
+				  PyUnicode_AsUTF8(cur_frame->f_code->co_filename),
+				  PyFrame_GetLineNumber(cur_frame),
+				  PyUnicode_AsUTF8(cur_frame->f_code->co_name)
+			);
 #endif
 
 			ptb = ptb->tb_next;
@@ -314,7 +311,7 @@ static void mod_vptuple(TALLOC_CTX *ctx, module_ctx_t const *mctx, request_t *re
 					&(tmpl_rules_t){
 						.attr = {
 							.dict_def = request->dict,
-							.list_def = PAIR_LIST_REPLY
+							.list_def = request_attr_reply
 						}
 					}) <= 0) {
 			ERROR("%s - Failed to find attribute %s.%s", funcname, list_name, s1);

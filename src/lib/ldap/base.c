@@ -509,7 +509,10 @@ fr_ldap_rcode_t fr_ldap_result(LDAPMessage **result, LDAPControl ***ctrls,
 
 /** Search for something in the LDAP directory
  *
- * Binds as the administrative user and performs a search, dealing with any errors.
+ * Performs an LDAP search, typically on a connection bound as the
+ * administrative user, dealing with any errors.
+ * Called from the trunk mux function and elsewhere where appropriate
+ * event handlers have been set on the connection fd.
  *
  * @param[out] msgid		to match response to request.
  * @param[in] request		Current request.
@@ -608,16 +611,21 @@ static unlang_action_t ldap_trunk_query_results(rlm_rcode_t *p_result, UNUSED in
 /** Signal an LDAP query running on a trunk connection to cancel
  *
  */
-static void ldap_trunk_query_cancel(UNUSED request_t *request, fr_state_signal_t action, void *uctx)
+static void ldap_trunk_query_cancel(UNUSED request_t *request, UNUSED fr_signal_t action, void *uctx)
 {
 	fr_ldap_query_t	*query = talloc_get_type_abort(uctx, fr_ldap_query_t);
 
-	if (action != FR_SIGNAL_CANCEL) return;
 	/*
 	 *	Query may have completed, but the request
 	 *	not yet have been resumed.
 	 */
 	if (!query->treq) return;
+
+	/*
+	 *	The query needs to be parented by the treq so that it still
+	 *	exists when the cancel_mux callback is run.
+	 */
+	talloc_steal(query->treq, query);
 
 	fr_trunk_request_signal_cancel(query->treq);
 
@@ -627,7 +635,6 @@ static void ldap_trunk_query_cancel(UNUSED request_t *request, fr_state_signal_t
 	 *	the trunk code.
 	 */
 	query->treq = NULL;
-
 }
 
 #define SET_LDAP_CTRLS(_dest, _src) \
@@ -639,25 +646,6 @@ do { \
 		_dest[i].control = _src[i]; \
 	} \
 } while (0)
-
-
-/** Hack to make code work with synchronous interpreter
- *
- */
-static unlang_action_t ldap_trunk_query_start(UNUSED rlm_rcode_t *p_result, UNUSED int *priority,
-					      UNUSED request_t *request, UNUSED void *uctx)
-{
-	return UNLANG_ACTION_YIELD;
-}
-
-/** Hack to add timeouts
- *
- * Here we send a cancellation signal to the trunk if the request hits the timeout limit.
- */
-static void _ldap_search_sync_timeout(UNUSED fr_event_list_t *el, UNUSED fr_time_t now, void *uctx)
-{
-	ldap_trunk_query_cancel(NULL, FR_SIGNAL_CANCEL, uctx);
-}
 
 /** Run an async or sync search LDAP query on a trunk connection
  *
@@ -672,22 +660,15 @@ static void _ldap_search_sync_timeout(UNUSED fr_event_list_t *el, UNUSED fr_time
  * @param[in] attrs		to be returned.
  * @param[in] serverctrls	specific to this query.
  * @param[in] clientctrls	specific to this query.
- * @param[in] is_async		If true, will return UNLANG_ACTION_YIELD
- *				and push a search onto the unlang stack
- *				for the current request.
- *				If false, will perform a synchronous search
- *				and provide the result in p_result.
  * @return
  *	- UNLANG_ACTION_FAIL on error.
- *	- UNLANG_ACTION_YIELD on success.
- *	- UNLANG_ACTION_CALCULATE_RESULT if the query was run synchronously.
+ *	- UNLANG_ACTION_PUSHED_CHILD on success.
  */
 unlang_action_t fr_ldap_trunk_search(rlm_rcode_t *p_result,
 				     TALLOC_CTX *ctx,
 				     fr_ldap_query_t **out, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
 				     char const *base_dn, int scope, char const *filter, char const * const *attrs,
-				     LDAPControl **serverctrls, LDAPControl **clientctrls,
-				     bool is_async)
+				     LDAPControl **serverctrls, LDAPControl **clientctrls)
 {
 	unlang_action_t action;
 	fr_ldap_query_t *query;
@@ -701,47 +682,23 @@ unlang_action_t fr_ldap_trunk_search(rlm_rcode_t *p_result,
 
 	default:
 	error:
-		*p_result = RLM_MODULE_FAIL;
+		if (p_result) *p_result = RLM_MODULE_FAIL;
 		*out = NULL;
 		talloc_free(query);
 		return UNLANG_ACTION_FAIL;
 	}
 
-	action = unlang_function_push(request, is_async ? NULL : ldap_trunk_query_start, ldap_trunk_query_results,
-				      ldap_trunk_query_cancel, is_async ? UNLANG_SUB_FRAME : UNLANG_TOP_FRAME, query);
+	action = unlang_function_push(request, NULL, ldap_trunk_query_results,
+				      ldap_trunk_query_cancel, ~FR_SIGNAL_CANCEL, UNLANG_SUB_FRAME, query);
 
 	if (action == UNLANG_ACTION_FAIL) goto error;
 
 	*out = query;
 
-	/*
-	 *	Hack until everything is async
-	 */
-	if (!is_async) {
-		fr_event_timer_t const *ev = NULL;
-
-		fr_time_delta_t timeout = ttrunk->config.res_timeout;
-
-		/*
-		 *	Add an event that'll send a cancellation request
-		 *	to the request.
-		 */
-		if (fr_time_delta_ispos(timeout)) {
-			if (fr_event_timer_in(ctx, unlang_interpret_event_list(request), &ev, timeout,
-					      _ldap_search_sync_timeout, query) < 0) goto error;
-		}
-
-		*p_result = unlang_interpret_synchronous(unlang_interpret_event_list(request), request);
-
-		talloc_const_free(ev);	/* If the timer fired this should be NULL */
-
-		return UNLANG_ACTION_CALCULATE_RESULT;
-	}
-
-	return UNLANG_ACTION_YIELD;
+	return UNLANG_ACTION_PUSHED_CHILD;
 }
 
-/** Run an async or sync modification LDAP query on a trunk connection
+/** Run an async modification LDAP query on a trunk connection
  *
  * @param[out] p_result		from synchronous evaluation.
  * @param[in] ctx		to allocate the query in.
@@ -752,22 +709,15 @@ unlang_action_t fr_ldap_trunk_search(rlm_rcode_t *p_result,
  * @param[in] mods		to be performed.
  * @param[in] serverctrls	specific to this query.
  * @param[in] clientctrls	specific to this query.
- * @param[in] is_async		If true, will return UNLANG_ACTION_YIELD
- *				and push a modify onto the unlang stack
- *				for the current request.
- *				If false, will perform a synchronous search
- *				and provide the result in p_result.
  * @return
  *	- UNLANG_ACTION_FAIL on error.
- *	- UNLANG_ACTION_YIELD on success.
- *	- UNLANG_ACTION_CALCULATE_RESULT if the query was run synchronously.
+ *	- UNLANG_ACTION_PUSHED_CHILD on success.
  */
 unlang_action_t fr_ldap_trunk_modify(rlm_rcode_t *p_result,
 				     TALLOC_CTX *ctx,
 				     fr_ldap_query_t **out, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
 				     char const *dn, LDAPMod *mods[],
-				     LDAPControl **serverctrls, LDAPControl **clientctrls,
-				     bool is_async)
+				     LDAPControl **serverctrls, LDAPControl **clientctrls)
 {
 	unlang_action_t action;
 	fr_ldap_query_t *query;
@@ -787,28 +737,22 @@ unlang_action_t fr_ldap_trunk_modify(rlm_rcode_t *p_result,
 		return UNLANG_ACTION_FAIL;
 	}
 
-	action = unlang_function_push(request, is_async ? NULL : ldap_trunk_query_start, ldap_trunk_query_results,
-				      ldap_trunk_query_cancel, is_async ? UNLANG_SUB_FRAME : UNLANG_TOP_FRAME, query);
+	action = unlang_function_push(request, NULL, ldap_trunk_query_results, ldap_trunk_query_cancel,
+				      ~FR_SIGNAL_CANCEL, UNLANG_SUB_FRAME, query);
 
 	if (action == UNLANG_ACTION_FAIL) goto error;
 
 	*out = query;
 
-	/*
-	 *	Hack until everything is async
-	 */
-	if (!is_async) {
-		*p_result = unlang_interpret_synchronous(unlang_interpret_event_list(request), request);
-		return UNLANG_ACTION_CALCULATE_RESULT;
-	}
-
-	return UNLANG_ACTION_YIELD;
+	return UNLANG_ACTION_PUSHED_CHILD;
 }
 
 /** Modify something in the LDAP directory
  *
- * Binds as the administrative user and attempts to modify an LDAP object.
+ * Used on connections bound as the administrative user to attempt to modify an LDAP object.
+ * Called by the trunk mux function
  *
+ * @param[out] msgid		LDAP message ID.
  * @param[in] request		Current request.
  * @param[in,out] pconn		to use. May change as this function calls functions which auto re-connect.
  * @param[in] dn		of the object to modify.
@@ -846,6 +790,80 @@ fr_ldap_rcode_t fr_ldap_modify_async(int *msgid, request_t *request, fr_ldap_con
 	return LDAP_PROC_SUCCESS;
 }
 
+/** Run an async LDAP "extended operation" query on a trunk connection
+ *
+ * @param[out] p_result		from synchronous evaluation.
+ * @param[in] ctx		to allocate the query in.
+ * @param[out] out		that has been allocated.
+ * @param[in] request		this query relates to.
+ * @param[in] ttrunk		to submit the query to.
+ * @param[in] reqoid		OID of extended operation.
+ * @param[in] reqdata		Request data to send.
+ * @param[in] serverctrls	specific to this query.
+ * @param[in] clientctrls	specific to this query.
+ * @return
+ *	- UNLANG_ACTION_FAIL on error.
+ *	- UNLANG_ACTION_PUSHED_CHILD on success.
+ */
+unlang_action_t fr_ldap_trunk_extended(rlm_rcode_t *p_result,
+				       TALLOC_CTX *ctx,
+				       fr_ldap_query_t **out, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
+				       char const *reqoid, struct berval *reqdata,
+				       LDAPControl **serverctrls, LDAPControl **clientctrls)
+{
+	unlang_action_t action;
+	fr_ldap_query_t *query;
+
+	query = fr_ldap_extended_alloc(ctx, reqoid, reqdata, serverctrls, clientctrls);
+
+	switch (fr_trunk_request_enqueue(&query->treq, ttrunk->trunk, request, query, NULL)) {
+	case FR_TRUNK_ENQUEUE_OK:
+	case FR_TRUNK_ENQUEUE_IN_BACKLOG:
+		break;
+
+	default:
+	error:
+		*out = NULL;
+		*p_result = RLM_MODULE_FAIL;
+		talloc_free(query);
+		return UNLANG_ACTION_FAIL;
+	}
+
+	action = unlang_function_push(request, NULL, ldap_trunk_query_results, ldap_trunk_query_cancel,
+				      ~FR_SIGNAL_CANCEL, UNLANG_SUB_FRAME, query);
+
+	if (action == UNLANG_ACTION_FAIL) goto error;
+
+	*out = query;
+
+	return UNLANG_ACTION_PUSHED_CHILD;
+}
+
+/** Initiate an LDAP extended operation
+ *
+ * Called by the trunk mux function
+ *
+ * @param[out] msgid	LDAP message ID.
+ * @param[in] request	Current request.
+ * @param[in] pconn	to use.
+ * @param[in] reqoid	OID of extended operation to perform.
+ * @param[in] reqdata	Data required for the request.
+ * @return One of the LDAP_PROC_* (#fr_ldap_rcode_t) values.
+ */
+fr_ldap_rcode_t fr_ldap_extended_async(int *msgid, request_t *request, fr_ldap_connection_t **pconn,
+				       char const *reqoid, struct berval *reqdata)
+{
+	int	err;
+
+	fr_assert(*pconn && (*pconn)->handle);
+
+	RDEBUG2("Requesting extended operation with OID %s", reqoid);
+	err = ldap_extended_operation((*pconn)->handle, reqoid, reqdata, NULL, NULL, msgid);
+
+	if (err) return LDAP_PROC_ERROR;
+	return LDAP_PROC_SUCCESS;
+}
+
 /** Free any libldap structures when an fr_ldap_query_t is freed
  *
  * It is also possible that the connection used for this query is now closed,
@@ -854,11 +872,6 @@ fr_ldap_rcode_t fr_ldap_modify_async(int *msgid, request_t *request, fr_ldap_con
 static int _ldap_query_free(fr_ldap_query_t *query)
 {
 	int 	i;
-
-	/*
-	 *	Remove the query from the tree of outstanding queries
-	 */
-	if (query->ldap_conn) fr_rb_remove(query->ldap_conn->queries, query);
 
 	/*
 	 *	Free any results which were retrieved
@@ -890,14 +903,24 @@ static int _ldap_query_free(fr_ldap_query_t *query)
 
 	fr_dlist_talloc_free(&query->referrals);
 
-	/*
-	 *	If the connection this query was using has no pending queries and
-	 * 	is no-longer associated with a fr_connection_t then free it
-	 */
-	if ((query->ldap_conn) && (query->ldap_conn->conn == NULL) &&
-	    (fr_rb_num_elements(query->ldap_conn->queries) == 0)) {
-		talloc_free(query->ldap_conn);
+	if (query->ldap_conn) {
+		/*
+		 *	Remove the query from the list of references to its connection
+		 */
+		fr_dlist_remove(&query->ldap_conn->refs, query);
+
+		/*
+		 *	If the connection this query was using has no pending queries and
+		 * 	is no-longer associated with a fr_connection_t then free it
+		 */
+		if (!query->ldap_conn->conn && (fr_dlist_num_elements(&query->ldap_conn->refs) == 0) &&
+	    	    (fr_rb_num_elements(query->ldap_conn->queries) == 0)) talloc_free(query->ldap_conn);
 	}
+
+	/*
+	 *	Ensure the request data for extended operations are freed.
+	 */
+	if (query->type == LDAP_REQUEST_EXTENDED && query->extended.reqdata) ber_bvfree(query->extended.reqdata);
 
 	return 0;
 }
@@ -921,7 +944,13 @@ fr_ldap_query_t *ldap_query_alloc(TALLOC_CTX *ctx, fr_ldap_request_type_t type)
 
 /** Allocate a new search object
  *
- * @param[in] ctx	to allocate query in.
+ * @param[in] ctx		to allocate query in.
+ * @param[in] base_dn		for the search.
+ * @param[in] scope		of the search.
+ * @param[in] filter		for the search
+ * @param[in] attrs		to request.
+ * @param[in] serverctrls	Search controls to pass to the server.  May be NULL.
+ * @param[in] clientctrls	Client controls.  May be NULL.
  */
 fr_ldap_query_t *fr_ldap_search_alloc(TALLOC_CTX *ctx,
 				      char const *base_dn, int scope, char const *filter, char const * const * attrs,
@@ -940,6 +969,15 @@ fr_ldap_query_t *fr_ldap_search_alloc(TALLOC_CTX *ctx,
 	return query;
 }
 
+/** Allocate a new LDAP modify object
+ *
+ * @param[in] ctx		to allocate the query in.
+ * @param[in] dn		of the object to modify.
+ * @param[in] mods		to apply to the object.
+ * @param[in] serverctrls	Controls to pass to the server.  May be NULL.
+ * @param[in] clientctrls	Client controls.  May be NULL.
+ * @return LDAP query object
+ */
 fr_ldap_query_t *fr_ldap_modify_alloc(TALLOC_CTX *ctx, char const *dn,
 				      LDAPMod *mods[], LDAPControl **serverctrls, LDAPControl **clientctrls)
 {
@@ -952,6 +990,29 @@ fr_ldap_query_t *fr_ldap_modify_alloc(TALLOC_CTX *ctx, char const *dn,
 	SET_LDAP_CTRLS(query->clientctrls, clientctrls);
 
 	return query;
+}
+
+/** Allocate a new LDAP extended operations object
+ *
+ * @param[in] ctx		to allocate the query in.
+ * @param[in] reqoid		OID of extended operation to perform.
+ * @param[in] reqdata		Request data to send.
+ * @param[in] serverctrls	Controls to pass to the server.  May be NULL.
+ * @param[in] clientctrls	Client controls.  May be NULL.
+ * @return LDAP query object
+ */
+fr_ldap_query_t *fr_ldap_extended_alloc(TALLOC_CTX *ctx, char const *reqoid, struct berval *reqdata,
+					LDAPControl **serverctrls, LDAPControl **clientctrls)
+{
+	fr_ldap_query_t *query;
+
+	query = ldap_query_alloc(ctx, LDAP_REQUEST_EXTENDED);
+	query->extended.reqoid = reqoid;
+	query->extended.reqdata = reqdata;
+	SET_LDAP_CTRLS(query->serverctrls, serverctrls);
+	SET_LDAP_CTRLS(query->clientctrls, clientctrls);
+
+	return (query);
 }
 
 static int _ldap_handle_thread_local_free(void *handle)

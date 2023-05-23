@@ -189,7 +189,8 @@ static fr_log_entry_t *strerror_vprintf(char const *file, int line, char const *
 /** Add a message to an existing stack of messages
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
+ * @param[in] buffer	The log buffer to allocate memory from.
  * @param[in] fmt	printf style format string.
  * @param[in] ap	Arguments for the error string.
  *
@@ -234,7 +235,7 @@ static fr_log_entry_t *strerror_vprintf_push(char const *file, int line,
 /** Log to thread local error buffer
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] fmt	printf style format string.
  *			If NULL clears any existing messages.
  * @param[in] ap	Arguments for the format string.
@@ -253,7 +254,7 @@ void _fr_strerror_vprintf(char const *file, int line, char const *fmt, va_list a
 /** Add a message to an existing stack of messages at the tail
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] fmt	printf style format string.
  * @param[in] ap	Arguments for the format string.
  *
@@ -280,7 +281,7 @@ void _fr_strerror_vprintf_push(char const *file, int line, char const *fmt, va_l
 /** Add a message to an existing stack of messages at the head
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] fmt	printf style format string.
  * @param[in] ap	Arguments for the format string.
  *
@@ -307,7 +308,7 @@ void _fr_strerror_vprintf_push_head(char const *file, int line, char const *fmt,
 /** Add an error marker to an existing stack of messages
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] subject	to mark up.
  * @param[in] offset	Positive offset to show where the error
  *			should be positioned.
@@ -335,7 +336,7 @@ void _fr_strerror_marker_vprintf(char const *file, int line,
 /** Add an error marker to an existing stack of messages at the tail
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] subject	to mark up.
  * @param[in] offset	Positive offset to show where the error
  *			should be positioned.
@@ -369,7 +370,7 @@ void _fr_strerror_marker_vprintf_push(char const *file, int line,
 /** Add an error marker to an existing stack of messages at the head
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] subject	to mark up.
  * @param[in] offset	Positive offset to show where the error
  *			should be positioned.
@@ -441,7 +442,7 @@ static inline CC_HINT(always_inline) fr_log_entry_t *strerror_const(char const *
 /** Log to thread local error buffer
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] msg	To add to error stack. Must have a
  *			lifetime equal to that of the program.
  * @hidecallergraph
@@ -454,7 +455,7 @@ void _fr_strerror_const(char const *file, int line, char const *msg)
 /** Add a message to an existing stack of messages
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] buffer	to add the message to.
  * @param[in] msg	To add to error stack. Must have a
  *			lifetime equal to that of the program.
@@ -498,7 +499,7 @@ static inline CC_HINT(always_inline) fr_log_entry_t *strerror_const_push(char co
 /** Add a message to an existing stack of messages at the tail
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] msg	To add to error stack. Must have a
  *			lifetime equal to that of the program.
  *
@@ -521,7 +522,7 @@ void _fr_strerror_const_push(char const *file, int line, char const *msg)
 /** Add a message to an existing stack of messages at the head
  *
  * @param[in] file	the error occurred in.
- * @parma[in] line	the error occurred on.
+ * @param[in] line	the error occurred on.
  * @param[in] msg	To add to error stack. Must have a
  *			lifetime equal to that of the program.
  *

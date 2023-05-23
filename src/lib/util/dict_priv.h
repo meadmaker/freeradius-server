@@ -81,6 +81,8 @@ struct fr_dict {
 
 	bool			autoloaded;		//!< manual vs autoload
 
+	bool			string_based;		//!< TACACS, etc.
+
 	fr_hash_table_t		*vendors_by_name;	//!< Lookup vendor by name.
 	fr_hash_table_t		*vendors_by_num;	//!< Lookup vendor by PEN.
 
@@ -99,7 +101,6 @@ struct fr_dict {
 	unsigned int		vsa_parent;		//!< varies with different protocols
 	int			default_type_size;	//!< for TLVs and VSAs
 	int			default_type_length;	//!< for TLVs and VSAs
-	unsigned int		self_allocated;		//!< track attribute numbers for self allocations
 
 	dl_t			*dl;			//!< for validation
 

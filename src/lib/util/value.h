@@ -89,8 +89,9 @@ extern fr_sbuff_escape_rules_t fr_value_escape_unprintables;
 /** @name List and cursor type definitions
  */
 FR_DLIST_TYPES(fr_value_box_list)
+FR_DLIST_TYPEDEFS(fr_value_box_list, fr_value_box_list_t, fr_value_box_entry_t)
 FR_DCURSOR_DLIST_TYPES(fr_value_box_dcursor, fr_value_box_list, fr_value_box_t)
-/** @} */
+/** @{ */
 
 typedef union {
 	/*
@@ -137,7 +138,7 @@ typedef union {
 	size_t					size;			//!< System specific file/memory size.
 	fr_time_delta_t				time_delta;		//!< a delta time in nanoseconds
 
-	FR_DLIST_HEAD(fr_value_box_list)	children;		//!< for groups
+	fr_value_box_list_t			children;		//!< for groups
 } fr_value_box_datum_t;
 
 /** Union containing all data types supported by the server
@@ -156,7 +157,7 @@ struct value_box_s {
 	bool					tainted;		//!< i.e. did it come from an untrusted source
 	uint16_t		_CONST		safe;			//!< more detailed safety
 
-	FR_DLIST_ENTRY(fr_value_box_list)	entry;			//!< Doubly linked list entry.
+	fr_value_box_entry_t			entry;			//!< Doubly linked list entry.
 
 	fr_dict_attr_t const			*enumv;			//!< Enumeration values.
 
@@ -170,7 +171,6 @@ FR_DLIST_FUNCS(fr_value_box_list, fr_value_box_t, entry)
 
 #define fr_value_box_list_foreach(_list_head, _iter)		fr_dlist_foreach(fr_value_box_list_dlist_head(_list_head), fr_value_box_t, _iter)
 #define fr_value_box_list_foreach_safe(_list_head, _iter)	fr_dlist_foreach_safe(fr_value_box_list_dlist_head(_list_head), fr_value_box_t, _iter)
-#define fr_value_box_list_verify(_list_head)			_fr_value_box_list_verify(__FILE__, __LINE__, _list_head)
 
 FR_DCURSOR_FUNCS(fr_value_box_dcursor, fr_value_box_list, fr_value_box_t)
 /** @} */
@@ -388,54 +388,10 @@ extern fr_sbuff_parse_rules_t const *value_parse_rules_quoted[T_TOKEN_LAST];
 extern fr_sbuff_parse_rules_t const *value_parse_rules_quoted_char[UINT8_MAX];
 /** @} */
 
-/** @name Convenience functions
+/** @name Allocation and initialisation functions
  *
  * These macros and inline functions simplify working
  * with lists of value boxes.
- *
- * @{
- */
-/** Determines whether a list contains the number of boxes required
- *
- * @param[in] list	of value boxes.
- * @param[in] min	The number of boxes required to return true.
- * @return
- *	- true if the list has at least min boxes.
- *	- false if the list has fewer than min boxes.
- */
-static inline CC_HINT(nonnull)
-bool fr_value_box_list_len_min(FR_DLIST_HEAD(fr_value_box_list) const *list, unsigned int min)
-{
-	unsigned int i = fr_value_box_list_num_elements(list);
-
-	return (i >= min);
-}
-
-/** @name Box to box copying
- *
- * @{
- */
-void		fr_value_box_clear_value(fr_value_box_t *data)
-		CC_HINT(nonnull(1));
-
-void		fr_value_box_clear(fr_value_box_t *data)
-		CC_HINT(nonnull(1));
-
-int		fr_value_box_copy(TALLOC_CTX *ctx, fr_value_box_t *dst, const fr_value_box_t *src)
-		CC_HINT(nonnull(2,3));
-
-void		fr_value_box_copy_shallow(TALLOC_CTX *ctx, fr_value_box_t *dst,
-					  const fr_value_box_t *src)
-		CC_HINT(nonnull(2,3));
-
-int		fr_value_box_steal(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_value_box_t *src)
-		CC_HINT(nonnull(2,3));
-/** @} */
-
-/** @name Value box assignment functions
- *
- * These functions allow C values to be assigned to value boxes.
- * They will work with uninitialised/stack allocated memory.
  *
  * @{
  */
@@ -448,10 +404,13 @@ int		fr_value_box_steal(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_value_box_t *sr
  * @param[in] type	to set.
  * @param[in] enumv	Enumeration values.
  * @param[in] tainted	Whether data will come from an untrusted source.
+ *
+ * @hidecallergraph
  */
 static inline CC_HINT(nonnull(1), always_inline)
 void fr_value_box_init(fr_value_box_t *vb, fr_type_t type, fr_dict_attr_t const *enumv, bool tainted)
 {
+	/* coverity[store_writes_const_field] */
 	memcpy(vb, &(fr_value_box_t){
 	       		.type = type,
 			.enumv = enumv,
@@ -534,12 +493,86 @@ fr_value_box_t *fr_value_box_alloc(TALLOC_CTX *ctx, fr_type_t type, fr_dict_attr
  * @return
  *	- A new fr_value_box_t.
  *	- NULL on error.
+ *
+ *  @hidecallergraph
  */
 static inline CC_HINT(always_inline)
 fr_value_box_t *fr_value_box_alloc_null(TALLOC_CTX *ctx)
 {
 	return fr_value_box_alloc(ctx, FR_TYPE_NULL, NULL, false);
 }
+/** @} */
+
+/** @name Convenience functions
+ *
+ * These macros and inline functions simplify working
+ * with lists of value boxes.
+ *
+ * @{
+ */
+/** Determines whether a list contains the number of boxes required
+ *
+ * @param[in] list	of value boxes.
+ * @param[in] min	The number of boxes required to return true.
+ * @return
+ *	- true if the list has at least min boxes.
+ *	- false if the list has fewer than min boxes.
+ */
+static inline CC_HINT(nonnull)
+bool fr_value_box_list_len_min(fr_value_box_list_t const *list, unsigned int min)
+{
+	unsigned int i = fr_value_box_list_num_elements(list);
+
+	return (i >= min);
+}
+/** @} */
+
+/** @name Box to box copying
+ *
+ * @{
+ */
+void		fr_value_box_clear_value(fr_value_box_t *data)
+		CC_HINT(nonnull(1));
+
+void		fr_value_box_clear(fr_value_box_t *data)
+		CC_HINT(nonnull(1));
+
+int		fr_value_box_copy(TALLOC_CTX *ctx, fr_value_box_t *dst, const fr_value_box_t *src)
+		CC_HINT(nonnull(2,3));
+
+void		fr_value_box_copy_shallow(TALLOC_CTX *ctx, fr_value_box_t *dst,
+					  const fr_value_box_t *src)
+		CC_HINT(nonnull(2,3));
+
+int		fr_value_box_steal(TALLOC_CTX *ctx, fr_value_box_t *dst, fr_value_box_t *src)
+		CC_HINT(nonnull(2,3));
+
+/** Copy an existing box, allocating a new box to hold its contents
+ *
+ * @param[in] ctx	to allocate new box in.
+ * @param[in] src	box to copy.
+ */
+static inline CC_HINT(nonnull(2))
+fr_value_box_t *fr_value_box_acopy(TALLOC_CTX *ctx, fr_value_box_t const *src)
+{
+	fr_value_box_t *vb = fr_value_box_alloc_null(ctx);
+
+	if ((unlikely(fr_value_box_copy(vb, vb, src) < 0))) {
+		talloc_free(vb);
+		return NULL;
+	}
+
+	return vb;
+}
+/** @} */
+
+/** @name Value box assignment functions
+ *
+ * These functions allow C values to be assigned to value boxes.
+ * They will work with uninitialised/stack allocated memory.
+ *
+ * @{
+ */
 
 /** Return a pointer to the "raw" value from a value-box.
  *
@@ -687,25 +720,15 @@ _Generic((_var), \
 	fr_ethernet_t const *	: fr_value_box_ethernet_addr, \
 	bool			: fr_value_box_bool, \
 	uint8_t			: fr_value_box_uint8, \
-	uint8_t const		: fr_value_box_uint8, \
 	uint16_t		: fr_value_box_uint16, \
-	uint16_t const		: fr_value_box_uint16, \
 	uint32_t		: fr_value_box_uint32, \
-	uint32_t const		: fr_value_box_uint32, \
 	uint64_t		: fr_value_box_uint64, \
-	uint64_t const		: fr_value_box_uint64, \
 	int8_t			: fr_value_box_int8, \
-	int8_t const		: fr_value_box_int8, \
 	int16_t			: fr_value_box_int16, \
-	int16_t const		: fr_value_box_int16, \
 	int32_t			: fr_value_box_int32, \
-	int32_t	const		: fr_value_box_int32, \
 	int64_t			: fr_value_box_int64, \
-	int64_t	const		: fr_value_box_int64, \
 	float			: fr_value_box_float32, \
-	float const		: fr_value_box_float32, \
-	double			: fr_value_box_float64, \
-	double const		: fr_value_box_float64 \
+	double			: fr_value_box_float64 \
 )(_box, NULL, _var, _tainted)
 
 /** Automagically fill in a box, for types with length
@@ -1006,36 +1029,39 @@ ssize_t		fr_value_box_from_str(TALLOC_CTX *ctx, fr_value_box_t *dst,
  *
  * @{
  */
-ssize_t 	fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, FR_DLIST_HEAD(fr_value_box_list) *list,
+ssize_t 	fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, fr_value_box_list_t *list,
 					   	  char const *sep, size_t sep_len, fr_sbuff_escape_rules_t const *e_rules,
 					   	  fr_value_box_list_action_t proc_action, bool flatten, bool printable)
 		CC_HINT(nonnull(2,3));
 
-ssize_t		fr_value_box_list_concat_as_octets(bool *tainted, fr_dbuff_t *dbuff, FR_DLIST_HEAD(fr_value_box_list) *list,
+ssize_t		fr_value_box_list_concat_as_octets(bool *tainted, fr_dbuff_t *dbuff, fr_value_box_list_t *list,
 						   uint8_t const *sep, size_t sep_len,
 						   fr_value_box_list_action_t proc_action, bool flatten)
 		CC_HINT(nonnull(2,3));
 
 int		fr_value_box_list_concat_in_place(TALLOC_CTX *ctx,
-						  fr_value_box_t *out, FR_DLIST_HEAD(fr_value_box_list) *list, fr_type_t type,
+						  fr_value_box_t *out, fr_value_box_list_t *list, fr_type_t type,
 						  fr_value_box_list_action_t proc_action, bool flatten,
 						  size_t max_size)
 		CC_HINT(nonnull(2,3));
 
-char		*fr_value_box_list_aprint(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) const *list, char const *delim,
+void		fr_value_box_flatten(TALLOC_CTX *ctx, fr_value_box_list_t *list, bool steal, bool free)
+		CC_HINT(nonnull(2));
+
+char		*fr_value_box_list_aprint(TALLOC_CTX *ctx, fr_value_box_list_t const *list, char const *delim,
 					  fr_sbuff_escape_rules_t const *e_rules)
 		CC_HINT(nonnull(2));
 
-int		fr_value_box_list_acopy(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, FR_DLIST_HEAD(fr_value_box_list) const *in)
+int		fr_value_box_list_acopy(TALLOC_CTX *ctx, fr_value_box_list_t *out, fr_value_box_list_t const *in)
 		CC_HINT(nonnull(2,3));
 
-bool		fr_value_box_list_tainted(FR_DLIST_HEAD(fr_value_box_list) const *head)
+bool		fr_value_box_list_tainted(fr_value_box_list_t const *head)
 		CC_HINT(nonnull(1));
 
-void		fr_value_box_list_taint(FR_DLIST_HEAD(fr_value_box_list) *head)
+void		fr_value_box_list_taint(fr_value_box_list_t *head)
 		CC_HINT(nonnull(1));
 
-void		fr_value_box_list_untaint(FR_DLIST_HEAD(fr_value_box_list) *head)
+void		fr_value_box_list_untaint(fr_value_box_list_t *head)
 		CC_HINT(nonnull(1));
 /** @} */
 
@@ -1068,16 +1094,16 @@ uint32_t	fr_value_box_hash(fr_value_box_t const *vb);
 
 /** @} */
 
-void		value_box_verify(char const *file, int line, fr_value_box_t const *vb, bool talloced)
+void		fr_value_box_verify(char const *file, int line, fr_value_box_t const *vb, bool talloced)
 		CC_HINT(nonnull(3));
-void		value_box_list_verify(char const *file, int line, FR_DLIST_HEAD(fr_value_box_list) const *list, bool talloced)
+void		fr_value_box_list_verify(char const *file, int line, fr_value_box_list_t const *list, bool talloced)
 		CC_HINT(nonnull(3));
 
 #ifdef WITH_VERIFY_PTR
-#  define VALUE_BOX_VERIFY(_x) value_box_verify(__FILE__, __LINE__, _x, false)
-#  define VALUE_BOX_LIST_VERIFY(_x) value_box_list_verify(__FILE__, __LINE__, _x, false)
-#  define VALUE_BOX_TALLOC_VERIFY(_x) value_box_verify(__FILE__, __LINE__, _x, true)
-#  define VALUE_BOX_TALLOC_LIST_VERIFY(_x) value_box_list_verify(__FILE__, __LINE__, _x, true)
+#  define VALUE_BOX_VERIFY(_x) fr_value_box_verify(__FILE__, __LINE__, _x, false)
+#  define VALUE_BOX_LIST_VERIFY(_x) fr_value_box_list_verify(__FILE__, __LINE__, _x, false)
+#  define VALUE_BOX_TALLOC_VERIFY(_x) fr_value_box_verify(__FILE__, __LINE__, _x, true)
+#  define VALUE_BOX_TALLOC_LIST_VERIFY(_x) fr_value_box_list_verify(__FILE__, __LINE__, _x, true)
 #else
 /*
  *  Even if were building without WITH_VERIFY_PTR
@@ -1089,6 +1115,14 @@ void		value_box_list_verify(char const *file, int line, FR_DLIST_HEAD(fr_value_b
 #  define VALUE_BOX_TALLOC_VERIFY(_x) fr_assert(_x)
 #  define VALUE_BOX_TALLOC_LIST_VERIFY(_x) fr_assert(_x)
 #endif
+
+/** @name Debug functions
+ *
+ * @{
+ */
+void fr_value_box_list_debug(fr_value_box_list_t const *head);
+void fr_value_box_debug(fr_value_box_t const *vb);
+/** @} */
 
 #undef _CONST
 

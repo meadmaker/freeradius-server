@@ -66,7 +66,6 @@ typedef struct {
 	fr_time_delta_t	max_request_time;	//!< maximum time a request can be processed
 
 	bool		unflatten_after_decode;		//!< the worker will call "unflatten" after protocol decoding
-	bool		flatten_before_encode;		//!< the worker will call "flatten" before all encoding
 	bool		unflatten_before_encode;	//!< the worker will call "unflatten" before all encoding
 
 	size_t		talloc_pool_size;	//!< for each request
@@ -88,6 +87,8 @@ void		fr_worker_post_event(fr_event_list_t *el, fr_time_t now, void *uctx);
 fr_channel_t	*fr_worker_channel_create(fr_worker_t *worker, TALLOC_CTX *ctx, fr_control_t *master) CC_HINT(nonnull);
 
 int		fr_worker_stats(fr_worker_t const *worker, int num, uint64_t *stats) CC_HINT(nonnull);
+
+int		fr_worker_listen_cancel(fr_worker_t *worker, fr_listen_t const *li);
 
 #include <freeradius-devel/server/module.h>
 

@@ -60,8 +60,8 @@ typedef struct {
 	bool				recv_buff_is_set;	//!< Whether we were provided with a receive
 								//!< buffer value.
 
-	RADCLIENT_LIST			*clients;		//!< local clients
-	RADCLIENT			*default_client;	//!< default 0/0 client
+	fr_client_list_t			*clients;		//!< local clients
+	fr_client_t			*default_client;	//!< default 0/0 client
 
 	fr_trie_t			*trie;			//!< for parsed networks
 	fr_ipaddr_t			*allow;			//!< allowed networks for dynamic clients
@@ -258,6 +258,7 @@ static int mod_open(fr_listen_t *li)
 	proto_dns_udp_thread_t	*thread = talloc_get_type_abort(li->thread_instance, proto_dns_udp_thread_t);
 
 	int				sockfd, rcode;
+	fr_ipaddr_t			ipaddr = inst->ipaddr;
 	uint16_t			port = inst->port;
 
 	li->fd = sockfd = fr_socket_server_udp(&inst->ipaddr, &port, "domain", true);
@@ -287,7 +288,7 @@ static int mod_open(fr_listen_t *li)
 	 *	SUID up is really only needed if interface is set, OR port <1024.
 	 */
 	rad_suid_up();
-	rcode = fr_socket_bind(sockfd, &inst->ipaddr, &port, inst->interface);
+	rcode = fr_socket_bind(sockfd, inst->interface, &ipaddr, &port);
 	rad_suid_down();
 	if (rcode < 0) {
 		PERROR("Failed binding socket");
@@ -341,7 +342,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	size_t			num;
 	CONF_ITEM		*ci;
 	CONF_SECTION		*server_cs;
-	RADCLIENT		*client;
+	fr_client_t		*client;
 
 	inst->cs = conf;
 
@@ -412,7 +413,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	/*
 	 *	Create a fake client.
 	 */
-	client = inst->default_client = talloc_zero(inst, RADCLIENT);
+	client = inst->default_client = talloc_zero(inst, fr_client_t);
 	if (!inst->default_client) return 0;
 
 	client->ipaddr = (fr_ipaddr_t ) {
@@ -427,7 +428,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	return 0;
 }
 
-static RADCLIENT *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
+static fr_client_t *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, int ipproto)
 {
 	proto_dns_udp_t const *inst = talloc_get_type_abort_const(li->app_io_instance, proto_dns_udp_t);
 
@@ -435,7 +436,7 @@ static RADCLIENT *mod_client_find(fr_listen_t *li, fr_ipaddr_t const *ipaddr, in
 	 *	Prefer local clients.
 	 */
 	if (inst->clients) {
-		RADCLIENT *client;
+		fr_client_t *client;
 
 		client = client_find(inst->clients, ipaddr, ipproto);
 		if (client) return client;

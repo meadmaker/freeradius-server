@@ -70,7 +70,7 @@ if (!(&control.Tmp-String-3[0] == 'Bob') || !(&control.Tmp-String-3[1] == 'dummy
 	test_fail
 }
 
-&control.Tmp-String-2 = "%{json_encode:&NAS-IP-Address}"
+&control.Tmp-String-2 = "%{json.encode:&NAS-IP-Address}"
 
 # POST to https with JSON body data
 &Tmp-String-2 := "%(rest:POST https://%{Tmp-String-0}:%{Tmp-Integer-1}/user/%{User-Name}/mac/%{Called-Station-Id}?section=accounting %{control.Tmp-String-2})"
@@ -130,6 +130,17 @@ if (!(&Tmp-String-2 == "{\"station\":\"Bob\"}\n" )) {
 &Tmp-String-2 := "%(rest:http://%{Tmp-String-0}:%{Tmp-Integer-0}/user/%{User-Name}/reflect/%{Tmp-String-9}?station=%{Called-Station-Id})"
 
 if (!(&Tmp-String-2 == "{\"station\":\"aa:bb:cc:dd:ee:ff\"}\n" )) {
+	test_fail
+}
+
+# Test against endpoint which will time out
+&Tmp-String-2 := "%(restshorttimeout:http://%{Tmp-String-0}:%{Tmp-Integer-0}/delay)"
+
+if (&REST-HTTP-Status-Code) {
+	test_fail
+}
+
+if (!(&Module-Failure-Message == "curl request failed: Timeout was reached (28)")) {
 	test_fail
 }
 

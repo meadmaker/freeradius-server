@@ -35,6 +35,14 @@ RCSID("$Id$")
 
 #define MAX_ARGV (16)
 
+typedef enum {
+	NEST_NONE = 0,
+	NEST_ROOT,
+	NEST_PROTOCOL,
+	NEST_VENDOR,
+	NEST_TLV,
+} dict_nest_t;
+
 /** Parser context for dict_from_file
  *
  * Allows vendor and TLV context to persist across $INCLUDEs
@@ -45,7 +53,7 @@ typedef struct {
 	char			*filename;		//!< name of the file we're reading
 	int			line;			//!< line number of this file
 	fr_dict_attr_t const	*da;			//!< the da we care about
-	fr_type_t		nest;			//!< for manual vs automatic begin / end things
+	dict_nest_t		nest;			//!< for manual vs automatic begin / end things
 	int			member_num;		//!< structure member numbers
 	ssize_t			struct_size;		//!< size of the struct.
 } dict_tokenize_frame_t;
@@ -108,7 +116,7 @@ int fr_dict_str_to_argv(char *str, char **argv, int max_argc)
 
 static int dict_read_sscanf_i(unsigned int *pvalue, char const *str)
 {
-	int ret = 0;
+	int unsigned ret = 0;
 	int base = 10;
 	static char const *tab = "0123456789";
 
@@ -326,7 +334,6 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 			}
 		}
 
-
 		/*
 		 *	Search for the first '=' or ','
 		 */
@@ -377,6 +384,31 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 		} else if (strcmp(key, "virtual") == 0) {
 			flags->virtual = 1;
 
+		} else if (strcmp(key, "offset") == 0) {
+			int offset;
+
+			if (type != FR_TYPE_STRUCT) {
+				fr_strerror_const("The 'offset' flag can only be used with data type 'struct'");
+				return -1;
+			}
+
+			if (!flags->extra || (!(flags->subtype == FLAG_LENGTH_UINT8) || (flags->subtype == FLAG_LENGTH_UINT16))) {
+				fr_strerror_const("The 'offset' flag can only be used in combination with 'length=uint8' or 'length=uint16'");
+				return -1;
+			}
+
+			if (!value) {
+				fr_strerror_const("The 'offset' flag requires a value");
+				return -1;
+			}
+
+			offset = atoi(value);
+			if ((offset <= 0) || (offset > 255)) {
+				fr_strerror_const("The 'offset' value must be between 1..255");
+				return -1;
+			}
+			flags->type_size = offset;
+
 		} else if (strcmp(key, "key") == 0) {
 			if ((type != FR_TYPE_UINT8) && (type != FR_TYPE_UINT16) && (type != FR_TYPE_UINT32)) {
 				fr_strerror_const("The 'key' flag can only be used for attributes of type 'uint8', 'uint16', or 'uint32'");
@@ -409,6 +441,7 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 				fr_strerror_const("Invalid value given for the 'length' flag");
 				return -1;
 			}
+			flags->type_size = 0;
 
 		} else if ((type == FR_TYPE_DATE) || (type == FR_TYPE_TIME_DELTA)) {
 			/*
@@ -499,6 +532,11 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 				return -1;
 			}
 
+			if ((type != FR_TYPE_TLV) && (type != FR_TYPE_STRUCT)) {
+				fr_strerror_const("'clone=...' references can only be used for 'tlv' and 'struct' types");
+				return -1;
+			}
+
 			/*
 			 *	Allow cloning of any types, so long as
 			 *	the types are the same.  We do the checks later.
@@ -521,12 +559,8 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 				return -1;
 			}
 
-			switch (type) {
-			case FR_TYPE_LEAF:
-				break;
-
-			default:
-				fr_strerror_const("ENUM references be used for structural types");
+			if (!fr_type_is_leaf(type)) {
+				fr_strerror_const("'enum=...' references cannot be used for structural types");
 				return -1;
 			}
 
@@ -556,6 +590,11 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 				ext = fr_dict_attr_ext(da, FR_DICT_ATTR_EXT_ENUMV);
 				if (!ext || !ext->value_by_name) {
 					fr_strerror_const("Invalid reference in 'enum=...', target has no VALUEs");
+					return -1;
+				}
+
+				if (fr_dict_attr_is_key_field(da)) {
+					fr_strerror_const("Invalid reference in 'enum=...', target is a 'key' field");
 					return -1;
 				}
 			}
@@ -598,6 +637,17 @@ static int dict_process_flag_field(dict_tokenize_ctx_t *ctx, char *name, fr_type
 	return 0;
 }
 
+static dict_tokenize_frame_t const *dict_gctx_find_frame(dict_tokenize_ctx_t *ctx, dict_nest_t nest)
+{
+	int i;
+
+	for (i = ctx->stack_depth; i > 0; i--) {
+		if (ctx->stack[i].nest == nest) return &ctx->stack[i];
+	}
+
+	return NULL;
+}
+
 
 static int dict_gctx_push(dict_tokenize_ctx_t *ctx, fr_dict_attr_t const *da)
 {
@@ -620,7 +670,7 @@ static int dict_gctx_push(dict_tokenize_ctx_t *ctx, fr_dict_attr_t const *da)
 static fr_dict_attr_t const *dict_gctx_unwind(dict_tokenize_ctx_t *ctx)
 {
 	while ((ctx->stack_depth > 0) &&
-	       (ctx->stack[ctx->stack_depth].nest == FR_TYPE_NULL)) {
+	       (ctx->stack[ctx->stack_depth].nest == NEST_NONE)) {
 		ctx->stack_depth--;
 	}
 
@@ -721,10 +771,129 @@ static int dict_read_process_alias(dict_tokenize_ctx_t *ctx, char **argv, int ar
 }
 
 /*
+ *	Process references.
+ */
+static int dict_process_ref(dict_tokenize_ctx_t *ctx, fr_dict_attr_t const *parent, fr_dict_attr_t const *da, char *ref)
+{
+	/*
+	 *	Groups can refer to other dictionaries, or other attributes.
+	 */
+	if (da->type == FR_TYPE_GROUP) {
+		fr_dict_attr_t		*self;
+		fr_dict_t		*dict;
+		char			*p;
+		ssize_t			slen;
+
+		memcpy(&self, &da, sizeof(self)); /* const issues */
+
+		/*
+		 *	No qualifiers, just point it to the root of the current dictionary.
+		 */
+		if (!ref) {
+			dict = ctx->dict;
+			da = ctx->dict->root;
+			goto check;
+		}
+
+		/*
+		 *	Else we find the reference.
+		 */
+		da = fr_dict_attr_by_oid(NULL, parent, ref);
+		if (da) {
+			dict = ctx->dict;
+			goto check;
+		}
+
+		/*
+		 *	The attribute doesn't exist, and the reference
+		 *	is FOO, it might be just a ref to a
+		 *	dictionary.
+		 */
+		p = strchr(ref, '.');
+		if (!p) goto fixup;
+
+		/*
+		 *	Get / skip protocol name.
+		 */
+		slen = dict_by_protocol_substr(NULL, &dict, &FR_SBUFF_IN(ref, strlen(ref)), ctx->dict);
+		if (slen < 0) {
+			talloc_free(ref);
+			return -1;
+		}
+
+		/*
+		 *	No known dictionary, so we're asked to just
+		 *	use the whole string.  Which we did above.  So
+		 *	either it's a bad ref, OR it's a ref to a
+		 *	dictionary which hasn't yet been loaded.
+		 *
+		 *	Save the fixup for later, when we've hopefully
+		 *	loaded the dictionary.
+		 */
+		if (slen == 0) {
+		fixup:
+			if (dict_fixup_group(&ctx->fixup, CURRENT_FRAME(ctx)->filename, CURRENT_FRAME(ctx)->line,
+					     self, ref, talloc_array_length(ref) - 1) < 0) {
+			oom:
+				talloc_free(ref);
+				return -1;
+			}
+			talloc_free(ref);
+
+			return 0;
+
+		} else if (ref[slen] == '\0') {
+			da = dict->root;
+			goto check;
+
+		} else {
+			/*
+			 *	Look up the attribute.
+			 */
+			da = fr_dict_attr_by_oid(NULL, parent, ref + slen);
+			if (!da) {
+				fr_strerror_printf("protocol loaded, but no attribute '%s'", ref + slen);
+				talloc_free(ref);
+				return -1;
+			}
+
+		check:
+			talloc_free(ref);
+
+			if (da->type != FR_TYPE_TLV) {
+				fr_strerror_const("References MUST be to an ATTRIBUTE of type 'tlv'");
+				return -1;
+			}
+
+			if (fr_dict_attr_ref(da)) {
+				fr_strerror_const("References MUST NOT refer to an ATTRIBUTE which also has 'ref=...'");
+				return -1;
+			}
+
+			self->dict = dict;
+
+			dict_attr_ref_set(self, da);
+		}
+	}
+
+	/*
+	 *	It's a "clone" thing.
+	 */
+	if (ref) {
+		if (dict_fixup_clone(&ctx->fixup, CURRENT_FRAME(ctx)->filename, CURRENT_FRAME(ctx)->line,
+				     fr_dict_attr_unconst(parent), fr_dict_attr_unconst(da),
+				     ref, talloc_array_length(ref) - 1) < 0) goto oom;
+		talloc_free(ref);
+	}
+
+	return 0;
+}
+
+/*
  *	Process the ATTRIBUTE command
  */
 static int dict_read_process_attribute(dict_tokenize_ctx_t *ctx, char **argv, int argc,
-				       fr_dict_attr_flags_t *base_flags)
+				       fr_dict_attr_flags_t const *base_flags)
 {
 	bool			set_relative_attr = true;
 
@@ -869,116 +1038,7 @@ static int dict_read_process_attribute(dict_tokenize_ctx_t *ctx, char **argv, in
 
 	if (set_relative_attr) ctx->relative_attr = da;
 
-	/*
-	 *	Groups can refer to other dictionaries, or other attributes.
-	 */
-	if (type == FR_TYPE_GROUP) {
-		fr_dict_attr_t		*self;
-		fr_dict_t		*dict;
-		char			*p;
-
-		memcpy(&self, &da, sizeof(self)); /* const issues */
-
-		/*
-		 *	No qualifiers, just point it to the root of the current dictionary.
-		 */
-		if (!ref) {
-			dict = ctx->dict;
-			da = ctx->dict->root;
-			goto check;
-		}
-
-		/*
-		 *	Else we find the reference.
-		 */
-		da = fr_dict_attr_by_oid(NULL, parent, ref);
-		if (da) {
-			dict = ctx->dict;
-			goto check;
-		}
-
-		/*
-		 *	The attribute doesn't exist, and the reference
-		 *	is FOO, it might be just a ref to a
-		 *	dictionary.
-		 */
-		p = strchr(ref, '.');
-		if (!p) goto fixup;
-
-		/*
-		 *	Get / skip protocol name.
-		 */
-		slen = dict_by_protocol_substr(NULL, &dict, &FR_SBUFF_IN(ref, strlen(ref)), ctx->dict);
-		if (slen < 0) {
-			talloc_free(ref);
-			return -1;
-		}
-
-		/*
-		 *	No known dictionary, so we're asked to just
-		 *	use the whole string.  Which we did above.  So
-		 *	either it's a bad ref, OR it's a ref to a
-		 *	dictionary which hasn't yet been loaded.
-		 *
-		 *	Save the fixup for later, when we've hopefully
-		 *	loaded the dictionary.
-		 */
-		if (slen == 0) {
-		fixup:
-			if (dict_fixup_group(&ctx->fixup, CURRENT_FRAME(ctx)->filename, CURRENT_FRAME(ctx)->line,
-					     self, ref, talloc_array_length(ref) - 1) < 0) {
-			oom:
-				talloc_free(ref);
-				return -1;
-			}
-			talloc_free(ref);
-
-			return 0;
-
-		} else if (ref[slen] == '\0') {
-			da = dict->root;
-			goto check;
-
-		} else {
-			/*
-			 *	Look up the attribute.
-			 */
-			da = fr_dict_attr_by_oid(NULL, parent, ref + slen);
-			if (!da) {
-				fr_strerror_printf("protocol loaded, but no attribute '%s'", ref + slen);
-				talloc_free(ref);
-				return -1;
-			}
-
-		check:
-			talloc_free(ref);
-
-			if (da->type != FR_TYPE_TLV) {
-				fr_strerror_const("References MUST be to an ATTRIBUTE of type 'tlv'");
-				return -1;
-			}
-
-			if (fr_dict_attr_ref(da)) {
-				fr_strerror_const("References MUST NOT refer to an ATTRIBUTE which also has 'ref=...'");
-				return -1;
-			}
-
-			self->dict = dict;
-
-			dict_attr_ref_set(self, da);
-		}
-	}
-
-	/*
-	 *	It's a "clone" thing.
-	 */
-	if (ref) {
-		if (dict_fixup_clone(&ctx->fixup, CURRENT_FRAME(ctx)->filename, CURRENT_FRAME(ctx)->line,
-				     fr_dict_attr_unconst(parent), fr_dict_attr_unconst(da),
-				     ref, talloc_array_length(ref) - 1) < 0) goto oom;
-		talloc_free(ref);
-		return 0;
-	}
+	if (dict_process_ref(ctx, parent, da, ref) < 0) return -1;
 
 	/*
 	 *	Adding an attribute of type 'struct' is an implicit
@@ -996,10 +1056,116 @@ static int dict_read_process_attribute(dict_tokenize_ctx_t *ctx, char **argv, in
 
 
 /*
+ *	Process the DEFINE command
+ *
+ *	Which is mostly like ATTRIBUTE, but does not have a number.
+ */
+static int dict_read_process_define(dict_tokenize_ctx_t *ctx, char **argv, int argc,
+				    fr_dict_attr_flags_t const *base_flags)
+{
+	fr_type_t      		type;
+	fr_dict_attr_flags_t	flags;
+	fr_dict_attr_t const	*parent, *da;
+	char			*ref = NULL;
+
+	if ((argc < 2) || (argc > 3)) {
+		fr_strerror_const("Invalid DEFINE syntax");
+		return -1;
+	}
+
+	/*
+	 *	Dictionaries need to have real names, not shitty ones.
+	 */
+	if (strncmp(argv[0], "Attr-", 5) == 0) {
+		fr_strerror_const("Invalid DEFINE name");
+		return -1;
+	}
+
+	/*
+	 *	Since there is no number, the attribute cannot be
+	 *	encoded as a number.
+	 */
+	memcpy(&flags, base_flags, sizeof(flags));
+	flags.name_only = true;
+
+	if (dict_process_type_field(ctx, argv[1], &type, &flags) < 0) return -1;
+
+	/*
+	 *	Certain structural types MUST have numbers.
+	 */
+	switch (type) {
+	case FR_TYPE_VSA:
+	case FR_TYPE_VENDOR:
+		fr_strerror_printf("DEFINE cannot be used for type '%s'", argv[1]);
+		return -1;
+
+	default:
+		break;
+	}
+
+	if (flags.extra && (flags.subtype == FLAG_BIT_FIELD)) {
+		fr_strerror_const("Bit fields can only be defined as a MEMBER of a STRUCT");
+		return -1;
+	}
+
+	parent = dict_gctx_unwind(ctx);
+
+	if (!fr_cond_assert(parent)) return -1;	/* Should have provided us with a parent */
+
+	/*
+	 *	Members of a 'struct' MUST use MEMBER, not ATTRIBUTE.
+	 */
+	if (parent->type == FR_TYPE_STRUCT) {
+		fr_strerror_printf("Member %s of parent %s type 'struct' MUST use the \"MEMBER\" keyword",
+				   argv[0], parent->name);
+		return -1;
+	}
+
+	/*
+	 *	Parse options.
+	 */
+	if (argc >= 3) {
+		if (dict_process_flag_field(ctx, argv[2], type, &flags, &ref) < 0) return -1;
+	} else {
+		if (!dict_attr_flags_valid(ctx->dict, parent, argv[2], NULL, type, &flags)) return -1;
+	}
+
+#ifdef STATIC_ANALYZER
+	if (!ctx->dict) return -1;
+#endif
+
+	/*
+	 *	Add in an attribute
+	 */
+	if (fr_dict_attr_add(ctx->dict, parent, argv[0], -1, type, &flags) < 0) return -1;
+
+	da = dict_attr_by_name(NULL, parent, argv[0]);
+	if (!da) {
+		fr_strerror_printf("Failed to find attribute '%s' we just added.", argv[0]);
+		return -1;
+	}
+
+	if (dict_process_ref(ctx, parent, da, ref) < 0) return -1;
+
+	/*
+	 *	Adding an attribute of type 'struct' is an implicit
+	 *	BEGIN-STRUCT.
+	 */
+	if (type == FR_TYPE_STRUCT) {
+		if (dict_gctx_push(ctx, da) < 0) return -1;
+		ctx->value_attr = NULL;
+	} else {
+		memcpy(&ctx->value_attr, &da, sizeof(da));
+	}
+
+	return 0;
+}
+
+/*
  *	Process the ENUM command
  */
 static int dict_read_process_enum(dict_tokenize_ctx_t *ctx, char **argv, int argc,
-				  fr_dict_attr_flags_t *base_flags)
+				  fr_dict_attr_flags_t const *base_flags)
 {
 	int			attr = -1;
 	fr_type_t      		type;
@@ -1020,6 +1186,11 @@ static int dict_read_process_enum(dict_tokenize_ctx_t *ctx, char **argv, int arg
 	}
 
 	flags = *base_flags;
+	flags.name_only = true;		/* values for ENUM are irrelevant */
+	flags.internal = true;		/* ENUMs will never get encoded into a protocol */
+#if 0
+	flags.is_enum = true;		/* it's an enum, and can't be assigned to a #fr_pair_t */
+#endif
 
 	if (dict_process_type_field(ctx, argv[1], &type, &flags) < 0) return -1;
 
@@ -1061,7 +1232,7 @@ static int dict_read_process_enum(dict_tokenize_ctx_t *ctx, char **argv, int arg
 	if (!dict_attr_fields_valid(ctx->dict, parent, argv[0], &attr, type, &flags)) return -1;
 
 	/*
-	 *	Add in an attribute
+	 *	Add the ENUM as if it was an ATTRIBUTE.
 	 */
 	if (fr_dict_attr_add(ctx->dict, parent, argv[0], attr, type, &flags) < 0) return -1;
 
@@ -1093,7 +1264,7 @@ static int dict_read_process_enum(dict_tokenize_ctx_t *ctx, char **argv, int arg
  *	Process the MEMBER command
  */
 static int dict_read_process_member(dict_tokenize_ctx_t *ctx, char **argv, int argc,
-				       fr_dict_attr_flags_t *base_flags)
+				       fr_dict_attr_flags_t const *base_flags)
 {
 	fr_type_t      		type;
 	fr_dict_attr_flags_t	flags;
@@ -1132,11 +1303,6 @@ static int dict_read_process_member(dict_tokenize_ctx_t *ctx, char **argv, int a
 	 */
 	if (argc >= 3) {
 		if (dict_process_flag_field(ctx, argv[2], type, &flags, &ref) < 0) return -1;
-
-		if (ref && (type != FR_TYPE_TLV) && !(flags.extra && (flags.subtype == FLAG_KEY_FIELD))) {
-			fr_strerror_const("Only MEMBERs of type 'tlv' or with 'key' flags can have references");\
-			return -1;
-		}
 
 	} else {
 		if (!dict_attr_flags_valid(ctx->dict, ctx->stack[ctx->stack_depth].da, argv[2], NULL, type, &flags)) return -1;
@@ -1491,13 +1657,9 @@ static int dict_read_process_struct(dict_tokenize_ctx_t *ctx, char **argv, int a
 	 *	with any other type of length.
 	 */
 	if (argc == 4) {
-		if (strcmp(argv[3], "length=uint16") != 0) {
-			fr_strerror_printf("Unknown option '%s'", argv[3]);
-			return -1;
-		}
+		char *ref;
 
-		flags.extra = 1;
-		flags.subtype = FLAG_LENGTH_UINT16;
+		if (dict_process_flag_field(ctx, argv[3], FR_TYPE_STRUCT, &flags, &ref) < 0) return -1;
 	}
 
 	/*
@@ -1622,6 +1784,7 @@ static int dict_read_process_protocol(char **argv, int argc)
 	fr_dict_t	*dict;
 	fr_dict_attr_t	*mutable;
 	bool		require_dl = false;
+	bool		string_based = false;
 
 	if ((argc < 2) || (argc > 3)) {
 		fr_strerror_const("Missing arguments after PROTOCOL.  Expected PROTOCOL <num> <name>");
@@ -1639,7 +1802,7 @@ static int dict_read_process_protocol(char **argv, int argc)
 	/*
 	 *	255 protocols FR_TYPE_GROUP type_size hack
 	 */
-	if ((value == 0) || (value > 255)) {
+	if (!value) {
 		fr_strerror_printf("Invalid value '%u' following PROTOCOL", value);
 		return -1;
 	}
@@ -1659,6 +1822,12 @@ static int dict_read_process_protocol(char **argv, int argc)
 		 */
 		if (strcmp(argv[2], "verify=lib") == 0) {
 			require_dl = true;
+			goto post_option;
+		}
+
+		if (strcmp(argv[2], "format=string") == 0) {
+			type_size = 4;
+			string_based = true;
 			goto post_option;
 		}
 
@@ -1736,6 +1905,7 @@ post_option:
 	if (dict_protocol_add(dict) < 0) goto error;
 
 	mutable = UNCONST(fr_dict_attr_t *, dict->root);
+	dict->string_based = string_based;
 	if (!type_size) {
 		mutable->flags.type_size = dict->default_type_size;
 		mutable->flags.length = dict->default_type_length;
@@ -1940,6 +2110,8 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 	memset(&base_flags, 0, sizeof(base_flags));
 
 	while (fgets(buf, sizeof(buf), fp) != NULL) {
+		dict_tokenize_frame_t const *frame;
+
 		ctx->stack[ctx->stack_depth].line = ++line;
 
 		switch (buf[0]) {
@@ -2052,6 +2224,16 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 		}
 
 		/*
+		 *	Perhaps this is an attribute.
+		 */
+		if (strcasecmp(argv[0], "DEFINE") == 0) {
+			if (dict_read_process_define(ctx,
+						     argv + 1, argc - 1,
+						     &base_flags) == -1) goto error;
+			continue;
+		}
+
+		/*
 		 *	Perhaps this is an enum.
 		 */
 		if (strcasecmp(argv[0], "ENUM") == 0) {
@@ -2129,7 +2311,7 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 			}
 
 			while (ctx->stack_depth > stack_depth) {
-				if (ctx->stack[ctx->stack_depth].nest == FR_TYPE_NULL) {
+				if (ctx->stack[ctx->stack_depth].nest == NEST_NONE) {
 					ctx->stack_depth--;
 					continue;
 				}
@@ -2200,6 +2382,13 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 				goto error;
 			}
 
+			frame = dict_gctx_find_frame(ctx, NEST_PROTOCOL);
+			if (frame) {
+				fr_strerror_printf_push("Nested BEGIN-PROTOCOL is forbidden.  Previous definition is at %s[%d]",
+							frame->filename, frame->line);
+				goto error;
+			}
+
 			/*
 			 *	Add a temporary fixup pool
 			 *
@@ -2216,7 +2405,7 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 			ctx->dict = found;
 
 			if (dict_gctx_push(ctx, ctx->dict->root) < 0) goto error;
-			ctx->stack[ctx->stack_depth].nest = FR_TYPE_MAX;
+			ctx->stack[ctx->stack_depth].nest = NEST_PROTOCOL;
 			continue;
 		}
 
@@ -2246,8 +2435,8 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 			/*
 			 *	Pop the stack until we get to a PROTOCOL nesting.
 			 */
-			while ((ctx->stack_depth > 0) && (ctx->stack[ctx->stack_depth].nest != FR_TYPE_MAX)) {
-				if (ctx->stack[ctx->stack_depth].nest != FR_TYPE_NULL) {
+			while ((ctx->stack_depth > 0) && (ctx->stack[ctx->stack_depth].nest != NEST_PROTOCOL)) {
+				if (ctx->stack[ctx->stack_depth].nest != NEST_NONE) {
 					fr_strerror_printf_push("END-PROTOCOL %s with mismatched BEGIN-??? %s", argv[1],
 						ctx->stack[ctx->stack_depth].da->name);
 					goto error;
@@ -2315,7 +2504,7 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 			}
 
 			if (dict_gctx_push(ctx, da) < 0) goto error;
-			ctx->stack[ctx->stack_depth].nest = FR_TYPE_TLV;
+			ctx->stack[ctx->stack_depth].nest = NEST_TLV;
 			continue;
 		} /* BEGIN-TLV */
 
@@ -2337,8 +2526,8 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 			/*
 			 *	Pop the stack until we get to a TLV nesting.
 			 */
-			while ((ctx->stack_depth > 0) && (ctx->stack[ctx->stack_depth].nest != FR_TYPE_TLV)) {
-				if (ctx->stack[ctx->stack_depth].nest != FR_TYPE_NULL) {
+			while ((ctx->stack_depth > 0) && (ctx->stack[ctx->stack_depth].nest != NEST_TLV)) {
+				if (ctx->stack[ctx->stack_depth].nest != NEST_NONE) {
 					fr_strerror_printf_push("END-TLV %s with mismatched BEGIN-??? %s", argv[1],
 						ctx->stack[ctx->stack_depth].da->name);
 					goto error;
@@ -2408,12 +2597,7 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 
 				vsa_da = da;
 
-			} else if (!ctx->dict->vsa_parent) {
-				fr_strerror_printf_push("BEGIN-VENDOR is forbidden for protocol %s - it has no ATTRIBUTE of type 'vsa'",
-							ctx->dict->root->name);
-				goto error;
-
-			} else {
+			} else if (ctx->dict->vsa_parent) {
 				/*
 				 *	Check that the protocol-specific VSA parent exists.
 				 */
@@ -2423,6 +2607,21 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 								vendor->name);
 					goto error;
 				}
+
+			} else if (ctx->dict->string_based) {
+				vsa_da = ctx->dict->root;
+
+			} else {
+				fr_strerror_printf_push("BEGIN-VENDOR is forbidden for protocol %s - it has no ATTRIBUTE of type 'vsa'",
+							ctx->dict->root->name);
+				goto error;
+			}
+
+			frame = dict_gctx_find_frame(ctx, NEST_VENDOR);
+			if (frame) {
+				fr_strerror_printf_push("Nested BEGIN-VENDOR is forbidden.  Previous definition is at %s[%d]",
+							frame->filename, frame->line);
+				goto error;
 			}
 
 			/*
@@ -2470,10 +2669,12 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 				}
 
 				vendor_da = new;
+			} else {
+				fr_assert(vendor_da->type == FR_TYPE_VENDOR);
 			}
 
 			if (dict_gctx_push(ctx, vendor_da) < 0) goto error;
-			ctx->stack[ctx->stack_depth].nest = FR_TYPE_VENDOR;
+			ctx->stack[ctx->stack_depth].nest = NEST_VENDOR;
 			continue;
 		} /* BEGIN-VENDOR */
 
@@ -2494,8 +2695,8 @@ static int _dict_from_file(dict_tokenize_ctx_t *ctx,
 			/*
 			 *	Pop the stack until we get to a VENDOR nesting.
 			 */
-			while ((ctx->stack_depth > 0) && (ctx->stack[ctx->stack_depth].nest != FR_TYPE_VENDOR)) {
-				if (ctx->stack[ctx->stack_depth].nest != FR_TYPE_NULL) {
+			while ((ctx->stack_depth > 0) && (ctx->stack[ctx->stack_depth].nest != NEST_VENDOR)) {
+				if (ctx->stack[ctx->stack_depth].nest != NEST_NONE) {
 					fr_strerror_printf_push("END-VENDOR %s with mismatched BEGIN-??? %s", argv[1],
 						ctx->stack[ctx->stack_depth].da->name);
 					goto error;
@@ -2550,7 +2751,7 @@ static int dict_from_file(fr_dict_t *dict,
 	dict_fixup_init(NULL, &ctx.fixup);
 	ctx.stack[0].dict = dict;
 	ctx.stack[0].da = dict->root;
-	ctx.stack[0].nest = FR_TYPE_MAX;
+	ctx.stack[0].nest = NEST_ROOT;
 
 	ret = _dict_from_file(&ctx, dir_name, filename, src_file, src_line);
 	if (ret < 0) {
@@ -2878,7 +3079,7 @@ int fr_dict_parse_str(fr_dict_t *dict, char *buf, fr_dict_attr_t const *parent)
 	ctx.dict = dict;
 	ctx.stack[0].dict = dict;
 	ctx.stack[0].da = dict->root;
-	ctx.stack[0].nest = FR_TYPE_MAX;
+	ctx.stack[0].nest = NEST_ROOT;
 
 	if (dict_fixup_init(NULL, &ctx.fixup) < 0) return -1;
 

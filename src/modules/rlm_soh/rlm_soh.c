@@ -26,6 +26,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/soh/base.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 typedef struct {
 	bool dhcp;
@@ -82,7 +83,7 @@ static xlat_arg_parser_t const soh_xlat_args[] = {
  */
 static xlat_action_t soh_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			      UNUSED xlat_ctx_t const *xctx, request_t *request,
-			      FR_DLIST_HEAD(fr_value_box_list) *in)
+			      fr_value_box_list_t *in)
 {
 	fr_value_box_t	*in_head = fr_value_box_list_head(in);
 	fr_value_box_t	*vb;
@@ -273,8 +274,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	rlm_soh_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_soh_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, soh_xlat, FR_TYPE_STRING, NULL);
-	xlat_func_args(xlat, soh_xlat_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, soh_xlat, FR_TYPE_STRING);
+	xlat_func_args_set(xlat, soh_xlat_args);
 
 	return 0;
 }

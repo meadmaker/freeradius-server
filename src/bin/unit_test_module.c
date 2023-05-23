@@ -99,10 +99,10 @@ fr_dict_attr_autoload_t unit_test_module_dict_attr[] = {
  */
 static void usage(main_config_t const *config, int status);
 
-static RADCLIENT *client_alloc(TALLOC_CTX *ctx, char const *ip, char const *name)
+static fr_client_t *client_alloc(TALLOC_CTX *ctx, char const *ip, char const *name)
 {
 	CONF_SECTION *cs;
-	RADCLIENT *client;
+	fr_client_t *client;
 
 	cs = cf_section_alloc(ctx, NULL, "client", name);
 	MEM(cf_pair_alloc(cs, "ipaddr", ip, T_OP_EQ, T_BARE_WORD, T_BARE_WORD));
@@ -113,7 +113,7 @@ static RADCLIENT *client_alloc(TALLOC_CTX *ctx, char const *ip, char const *name
 	MEM(cf_pair_alloc(cs, "groups", "bar", T_OP_EQ, T_BARE_WORD, T_DOUBLE_QUOTED_STRING));
 	MEM(cf_pair_alloc(cs, "groups", "baz", T_OP_EQ, T_BARE_WORD, T_DOUBLE_QUOTED_STRING));
 
-	client = client_afrom_cs(ctx, cs, NULL);
+	client = client_afrom_cs(ctx, cs, NULL, 0);
 	if (!client) {
 		PERROR("Failed creating test client");
 		fr_assert(0);
@@ -124,7 +124,7 @@ static RADCLIENT *client_alloc(TALLOC_CTX *ctx, char const *ip, char const *name
 	return client;
 }
 
-static request_t *request_from_file(TALLOC_CTX *ctx, FILE *fp, RADCLIENT *client, CONF_SECTION *server_cs)
+static request_t *request_from_file(TALLOC_CTX *ctx, FILE *fp, fr_client_t *client, CONF_SECTION *server_cs)
 {
 	fr_pair_t	*vp;
 	request_t	*request;
@@ -141,7 +141,7 @@ static request_t *request_from_file(TALLOC_CTX *ctx, FILE *fp, RADCLIENT *client
 	 *	FIXME - Should be less RADIUS centric, but everything
 	 *	else assumes RADIUS at the moment so we can fix this later.
 	 */
-	request->dict = fr_dict_by_protocol_name(PROTOCOL_NAME);
+	request->dict = dict_protocol;
 	if (!request->dict) {
 		fr_strerror_printf_push("%s dictionary failed to load", PROTOCOL_NAME);
 	error:
@@ -440,9 +440,10 @@ static bool do_xlats(fr_event_list_t *el, char const *filename, FILE *fp)
 								  &(tmpl_rules_t) {
 									  .attr = {
 										  .dict_def = dict_protocol,
+										  .list_def = request_attr_request,
 										  .allow_unresolved = true,
 									  }
-										  }
+								  }
 								);
 			if (slen <= 0) {
 				talloc_free(xlat_ctx);
@@ -512,10 +513,11 @@ static int map_proc_verify(CONF_SECTION *cs, UNUSED void *mod_inst, UNUSED void 
 	return 0;
 }
 
-static rlm_rcode_t mod_map_proc(UNUSED void *mod_inst, UNUSED void *proc_inst, UNUSED request_t *request,
-			      	UNUSED FR_DLIST_HEAD(fr_value_box_list) *src, UNUSED map_list_t const *maps)
+static unlang_action_t mod_map_proc(rlm_rcode_t *p_result, UNUSED void *mod_inst, UNUSED void *proc_inst,
+				    UNUSED request_t *request, UNUSED fr_value_box_list_t *src,
+				    UNUSED map_list_t const *maps)
 {
-	return RLM_MODULE_FAIL;
+	RETURN_MODULE_FAIL;
 }
 
 static request_t *request_clone(request_t *old, int number, CONF_SECTION *server_cs)
@@ -560,7 +562,7 @@ int main(int argc, char *argv[])
 	fr_pair_list_t		filter_vps;
 	bool			xlat_only = false;
 	fr_event_list_t		*el = NULL;
-	RADCLIENT		*client = NULL;
+	fr_client_t		*client = NULL;
 	fr_dict_t		*dict = NULL;
 	fr_dict_t const		*dict_check;
 	char const 		*receipt_file = NULL;
@@ -783,6 +785,11 @@ int main(int argc, char *argv[])
 	}
 	if (fr_dict_attr_autoload(unit_test_module_dict_attr) < 0) {
 		fr_perror("%s", config->name);
+		EXIT_WITH_FAILURE;
+	}
+
+	if (request_global_init() < 0) {
+		fr_perror("unit_test_module");
 		EXIT_WITH_FAILURE;
 	}
 

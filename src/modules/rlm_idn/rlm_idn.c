@@ -25,6 +25,7 @@ RCSID("$Id$")
 
 #include <freeradius-devel/server/base.h>
 #include <freeradius-devel/server/module_rlm.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include <idna.h>
 
@@ -86,7 +87,10 @@ static const CONF_PARSER mod_config[] = {
 	CONF_PARSER_TERMINATOR
 };
 
-static xlat_arg_parser_t const xlat_idna_arg = { .required = true, .concat = true, .type = FR_TYPE_STRING };
+static xlat_arg_parser_t const xlat_idna_arg[] = {
+	{ .required = true, .concat = true, .type = FR_TYPE_STRING },
+	XLAT_ARG_PARSER_TERMINATOR
+};
 
 /** Convert domain name to ASCII punycode
  *
@@ -98,7 +102,7 @@ static xlat_arg_parser_t const xlat_idna_arg = { .required = true, .concat = tru
  */
 static xlat_action_t xlat_idna(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx,
-			       request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			       request_t *request, fr_value_box_list_t *in)
 {
 	rlm_idn_t const	*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_idn_t);
 	char		*idna = NULL;
@@ -149,8 +153,9 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	rlm_idn_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_idn_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, xlat_idna, FR_TYPE_STRING, XLAT_FLAG_PURE);
-	xlat_func_mono(xlat, &xlat_idna_arg);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_idna, FR_TYPE_STRING);
+	xlat_func_mono_set(xlat, xlat_idna_arg);
+	xlat_func_flags_set(xlat, XLAT_FUNC_FLAG_PURE);
 
 	return 0;
 }

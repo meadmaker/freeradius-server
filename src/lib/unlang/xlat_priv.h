@@ -32,7 +32,10 @@ extern "C" {
 
 #include <freeradius-devel/unlang/xlat_ctx.h>
 #include <freeradius-devel/unlang/xlat.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 #include <freeradius-devel/io/pair.h>
+#include <freeradius-devel/util/talloc.h>
+#include <freeradius-devel/build.h>
 
 #ifdef DEBUG_XLAT
 #  define XLAT_DEBUG RDEBUG3
@@ -40,9 +43,17 @@ extern "C" {
 #  define XLAT_DEBUG(...)
 #endif
 
-typedef fr_slen_t (*xlat_print_t)(fr_sbuff_t *in, xlat_exp_t const *self, void *inst, fr_sbuff_escape_rules_t const *e_rules);
-typedef int (*xlat_resolve_t)(xlat_exp_t *self, void *inst, xlat_res_rules_t const *xr_rules);
-typedef int (*xlat_purify_t)(xlat_exp_t *self, void *inst, request_t *request);
+/*
+ *	Allow public and private versions of the same structures
+ */
+#ifdef _CONST
+#  error _CONST can only be defined in the local header
+#endif
+#ifndef _XLAT_PRIVATE
+#  define _CONST const
+#else
+#  define _CONST
+#endif
 
 typedef struct xlat_s {
 	fr_rb_node_t		node;			//!< Entry in the xlat function tree.
@@ -76,6 +87,10 @@ typedef struct xlat_s {
 
 	xlat_input_type_t	input_type;		//!< Type of input used.
 	xlat_arg_parser_t const	*args;			//!< Definition of args consumed.
+
+	call_method_env_t const	*call_env;		//!< Optional tmpl expansions performed before calling the
+							///< xlat.  Typically used for xlats which refer to tmpls
+							///< in their module config.
 
 	fr_type_t		return_type;		//!< Function is guaranteed to return one or more boxes
 							///< of this type.  If the return type is FR_TYPE_VOID
@@ -117,6 +132,8 @@ typedef struct {
 							///< into the instance tree.
 	xlat_input_type_t	input_type;		//!< The input type used inferred from the
 							///< bracketing style.
+
+	fr_dict_t const		*dict;			//!< Dictionary to use when resolving call env tmpls
 } xlat_call_t;
 
 /** An xlat expansion node
@@ -124,13 +141,19 @@ typedef struct {
  * These nodes form a tree which represents one or more nested expansions.
  */
 struct xlat_exp_s {
-	char const	*fmt;		//!< The original format string (a talloced buffer).
-	fr_token_t	quote;		//!< Type of quoting around XLAT_GROUP types.
+	fr_dlist_t		entry;
 
-	xlat_flags_t	flags;		//!< Flags that control resolution and evaluation.
+	char const *  _CONST	fmt;		//!< The original format string (a talloced buffer).
+	fr_token_t		quote;		//!< Type of quoting around XLAT_GROUP types.
 
-	xlat_type_t	type;		//!< type of this expansion.
-	fr_dlist_t	entry;
+	xlat_flags_t		flags;		//!< Flags that control resolution and evaluation.
+
+	xlat_type_t _CONST	type;		//!< type of this expansion.
+
+#ifndef NDEBUG
+	char const * _CONST	file;		//!< File where the xlat was allocated.
+	int			line;		//!< Line where the xlat was alocated.
+#endif
 
 	union {
 		xlat_exp_head_t	*alternate[2];	//!< alternate expansions
@@ -152,28 +175,45 @@ struct xlat_exp_s {
 		xlat_call_t	call;
 
 		/** A value box
-		 *
 		 */
 		fr_value_box_t	data;
 	};
 };
 
 struct xlat_exp_head_s {
-	char const	*fmt;		//!< The original format string (a talloced buffer).
-	xlat_flags_t	flags;		//!< Flags that control resolution and evaluation.
-	bool		instantiated;	//!< temporary flag until we fix more things
-	fr_dict_t const	*dict;		//!< dictionary for this xlat
-	fr_dlist_head_t	dlist;
+	fr_dlist_head_t		dlist;
+	xlat_flags_t		flags;		//!< Flags that control resolution and evaluation.
+	bool			instantiated;	//!< temporary flag until we fix more things
+	fr_dict_t const		*dict;		//!< dictionary for this xlat
+
+#ifndef NDEBUG
+	char const * _CONST	file;		//!< File where the xlat was allocated.
+	int			line;		//!< Line where the xlat was alocated.
+#endif
 };
 
-
 typedef struct {
-	char const	*out;		//!< Output data.
-	size_t		len;		//!< Length of the output string.
+	char const		*out;		//!< Output data.
+	size_t			len;		//!< Length of the output string.
 } xlat_out_t;
 /*
  *	Helper functions
  */
+
+static inline xlat_exp_t *xlat_exp_head(xlat_exp_head_t const *head)
+{
+	if (!head) return NULL;
+
+	return fr_dlist_head(&head->dlist);
+}
+
+/** Iterate over the contents of a list, only one level
+ *
+ * @param[in] _list_head	to iterate over.
+ * @param[in] _iter		Name of iteration variable.
+ *				Will be declared in the scope of the loop.
+ */
+#define xlat_exp_foreach(_list_head, _iter) fr_dlist_foreach(&((_list_head)->dlist), xlat_exp_t, _iter)
 
 /** Merge flags from child to parent
  *
@@ -188,111 +228,19 @@ static inline CC_HINT(nonnull) void xlat_flags_merge(xlat_flags_t *parent, xlat_
 	parent->constant &= child->constant;
 }
 
-/** Set the type of an xlat node
- *
- * @param[in] node	to set type for.
- * @param[in] type	to set.
- */
-static inline void xlat_exp_set_type(xlat_exp_t *node, xlat_type_t type)
+static inline CC_HINT(nonnull) int xlat_exp_insert_tail(xlat_exp_head_t *head, xlat_exp_t *node)
 {
-	node->type = type;
+	XLAT_VERIFY(node);
+
+	xlat_flags_merge(&head->flags, &node->flags);
+	return fr_dlist_insert_tail(&head->dlist, node);
 }
 
-/** Allocate an xlat node with no name, and no type set
- *
- * @param[in] ctx	to allocate node in.
- * @return A new xlat node.
- */
-static inline xlat_exp_t *xlat_exp_alloc_null(TALLOC_CTX *ctx)
+static inline xlat_exp_t *xlat_exp_next(xlat_exp_head_t const *head, xlat_exp_t const *node)
 {
-	xlat_exp_t *node;
+	if (!head) return NULL;
 
-	MEM(node = talloc_zero(ctx, xlat_exp_t));
-	node->flags.pure = true;	/* everything starts pure */
-	node->quote = T_BARE_WORD;
-
-	return node;
-}
-
-/** Allocate an xlat node
- *
- * @param[in] ctx	to allocate node in.
- * @param[in] type	of the node.
- * @param[in] in	original input string.
- * @param[in] inlen	the length of the original input string.
- * @return A new xlat node.
- */
-static inline xlat_exp_t *xlat_exp_alloc(TALLOC_CTX *ctx, xlat_type_t type,
-					 char const *in, size_t inlen)
-{
-	xlat_exp_t *node;
-
-	node = xlat_exp_alloc_null(ctx);
-	node->type = type;
-
-	if (!in) return node;
-
-	node->fmt = talloc_bstrndup(node, in, inlen);
-	switch (type) {
-	case XLAT_BOX:
-		fr_value_box_strdup_shallow(&node->data, NULL, node->fmt, false);
-		break;
-
-	default:
-		break;
-	}
-
-	return node;
-}
-
-/** Set the format string for an xlat node
- *
- * @param[in] node	to set fmt for.
- * @param[in] fmt	talloced buffer to set as the fmt string.
- */
-static inline void xlat_exp_set_name_buffer_shallow(xlat_exp_t *node, char const *fmt)
-{
-	if (node->fmt) talloc_const_free(node->fmt);
-	node->fmt = fmt;
-}
-
-
-/** Mark an xlat function as internal
- *
- * @param[in] xlat to mark as internal.
- */
-static inline void xlat_internal(xlat_t *xlat)
-{
-	xlat->internal = true;
-}
-
-/** Set a print routine for an xlat function.
- *
- * @param[in] xlat to set
- */
-static inline void xlat_print_set(xlat_t *xlat, xlat_print_t func)
-{
-	xlat->print = func;
-}
-
-
-/** Set a resolve routine for an xlat function.
- *
- * @param[in] xlat to set
- */
-static inline void xlat_resolve_set(xlat_t *xlat, xlat_resolve_t func)
-{
-	xlat->resolve = func;
-}
-
-
-/** Set a resolve routine for an xlat function.
- *
- * @param[in] xlat to set
- */
-static inline void xlat_purify_set(xlat_t *xlat, xlat_purify_t func)
-{
-	xlat->purify = func;
+	return fr_dlist_next(&head->dlist, node);
 }
 
 /*
@@ -312,9 +260,28 @@ int xlat_purify_list(xlat_exp_head_t *head, request_t *request);
 typedef int (*xlat_walker_t)(xlat_exp_t *exp, void *uctx);
 
 /*
+ *	xlat_alloc.c
+ */
+xlat_exp_head_t	*_xlat_exp_head_alloc(NDEBUG_LOCATION_ARGS TALLOC_CTX *ctx);
+#define		xlat_exp_head_alloc(_ctx) _xlat_exp_head_alloc(NDEBUG_LOCATION_EXP _ctx)
+
+void		_xlat_exp_set_type(NDEBUG_LOCATION_ARGS xlat_exp_t *node, xlat_type_t type);
+#define		xlat_exp_set_type(_node, _type) _xlat_exp_set_type(NDEBUG_LOCATION_EXP _node, _type)
+
+xlat_exp_t	*_xlat_exp_alloc_null(NDEBUG_LOCATION_ARGS TALLOC_CTX *ctx);
+#define		xlat_exp_alloc_null(_ctx) _xlat_exp_alloc_null(NDEBUG_LOCATION_EXP _ctx)
+
+xlat_exp_t	*_xlat_exp_alloc(NDEBUG_LOCATION_ARGS TALLOC_CTX *ctx, xlat_type_t type, char const *in, size_t inlen);
+#define		xlat_exp_alloc(_ctx, _type, _in, _inlen) _xlat_exp_alloc(NDEBUG_LOCATION_EXP _ctx, _type, _in, _inlen)
+
+void		xlat_exp_set_name(xlat_exp_t *node, char const *fmt, size_t len) CC_HINT(nonnull);
+void		xlat_exp_set_name_buffer_shallow(xlat_exp_t *node, char const *fmt) CC_HINT(nonnull);
+void		xlat_exp_set_name_buffer(xlat_exp_t *node, char const *fmt) CC_HINT(nonnull);
+
+/*
  *	xlat_func.c
  */
-xlat_t	*xlat_func_find(char const *name, ssize_t namelen);
+xlat_t		*xlat_func_find(char const *name, ssize_t namelen);
 
 /*
  *	xlat_eval.c
@@ -324,17 +291,17 @@ extern fr_dict_attr_t const *attr_module_return_code;
 extern fr_dict_attr_t const *attr_cast_base;
 
 void		xlat_signal(xlat_func_signal_t signal, xlat_exp_t const *exp,
-			    request_t *request, void *rctx, fr_state_signal_t action);
+			    request_t *request, void *rctx, fr_signal_t action);
 
 xlat_action_t	xlat_frame_eval_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				       xlat_exp_head_t const **child,
 				       request_t *request,  xlat_exp_head_t const *head, xlat_exp_t const **in,
-				       FR_DLIST_HEAD(fr_value_box_list) *result, xlat_func_t resume, void *rctx);
+				       fr_value_box_list_t *result, xlat_func_t resume, void *rctx);
 
 xlat_action_t	xlat_frame_eval_repeat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				       xlat_exp_head_t const **child, bool *alternate,
 				       request_t *request, xlat_exp_head_t const *head, xlat_exp_t const **in,
-				       FR_DLIST_HEAD(fr_value_box_list) *result) CC_HINT(nonnull(1,2,3,5));
+				       void *env_data, fr_value_box_list_t *result) CC_HINT(nonnull(1,2,3,5));
 
 xlat_action_t	xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_t const **child,
 				request_t *request, xlat_exp_head_t const *head, xlat_exp_t const **in);
@@ -347,12 +314,12 @@ void		xlat_eval_free(void);
 
 void		unlang_xlat_init(void);
 
-int		unlang_xlat_push_node(TALLOC_CTX *ctx, bool *p_success, FR_DLIST_HEAD(fr_value_box_list) *out,
+int		unlang_xlat_push_node(TALLOC_CTX *ctx, bool *p_success, fr_value_box_list_t *out,
 				      request_t *request, xlat_exp_t *node);
 
-int xlat_decode_value_box_list(TALLOC_CTX *ctx, fr_pair_list_t *out,
-			       request_t *request, void *decode_ctx, fr_pair_decode_t decode,
-			       FR_DLIST_HEAD(fr_value_box_list) *in);
+int 		xlat_decode_value_box_list(TALLOC_CTX *ctx, fr_pair_list_t *out,
+					   request_t *request, void *decode_ctx, fr_pair_decode_t decode,
+					   fr_value_box_list_t *in);
 /*
  *	xlat_expr.c
  */
@@ -367,53 +334,13 @@ int		xlat_tokenize_expansion(xlat_exp_head_t *head, fr_sbuff_t *in,
 int		xlat_tokenize_function_args(xlat_exp_head_t *head, fr_sbuff_t *in,
 					    tmpl_rules_t const *t_rules);
 
-ssize_t		xlat_print_node(fr_sbuff_t *out, xlat_exp_head_t const *head, xlat_exp_t const *node, fr_sbuff_escape_rules_t const *e_rules);
+ssize_t		xlat_print_node(fr_sbuff_t *out, xlat_exp_head_t const *head, xlat_exp_t const *node,
+				fr_sbuff_escape_rules_t const *e_rules);
 
 /*
  *	xlat_inst.c
  */
 int		xlat_inst_remove(xlat_exp_t *node);
-
-static inline xlat_exp_t *xlat_exp_head(xlat_exp_head_t const *head)
-{
-	if (!head) return NULL;
-
-	return fr_dlist_head(&head->dlist);
-}
-
-/** Iterate over the contents of a list, only one level
- *
- * @param[in] _list_head	to iterate over.
- * @param[in] _iter		Name of iteration variable.
- *				Will be declared in the scope of the loop.
- */
-#define xlat_exp_foreach(_list_head, _iter) fr_dlist_foreach(&((_list_head)->dlist), xlat_exp_t, _iter)
-
-static inline xlat_exp_t *xlat_exp_next(xlat_exp_head_t const *head, xlat_exp_t const *node)
-{
-	if (!head) return NULL;
-
-	return fr_dlist_next(&head->dlist, node);
-}
-
-static inline int xlat_exp_insert_tail(xlat_exp_head_t *head, xlat_exp_t *node)
-{
-	xlat_flags_merge(&head->flags, &node->flags);
-	return fr_dlist_insert_tail(&head->dlist, node);
-}
-
-static inline xlat_exp_head_t *xlat_exp_head_alloc(TALLOC_CTX *ctx)
-{
-	xlat_exp_head_t *head;
-
-	head = talloc_zero(ctx, xlat_exp_head_t);
-	if (!head) return NULL;
-
-	fr_dlist_init(&head->dlist, xlat_exp_t, entry);
-	head->flags.pure = true;
-
-	return head;
-}
 
 #ifdef __cplusplus
 }

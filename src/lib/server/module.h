@@ -35,6 +35,7 @@ extern "C" {
 #include <freeradius-devel/server/module_ctx.h>
 #include <freeradius-devel/unlang/action.h>
 #include <freeradius-devel/unlang/compile.h>
+#include <freeradius-devel/unlang/call_env.h>
 #include <freeradius-devel/util/event.h>
 
 typedef struct module_s				module_t;
@@ -56,6 +57,7 @@ typedef struct module_list_t			module_list_t;
  * Is called when the module is listed in a particular section of a virtual
  * server, and the request has reached the module call.
  *
+ * @param[out] p_result		Result code of the module method.
  * @param[in] mctx		Holds global instance data, thread instance
  *				data and call specific instance data.
  * @param[in] request		to process.
@@ -120,10 +122,11 @@ extern "C" {
  *
  */
 struct module_method_name_s {
-	char const		*name1;			//!< i.e. "recv", "send", "process"
-	char const		*name2;			//!< The packet type i.e Access-Request, Access-Reject.
+	char const			*name1;			//!< i.e. "recv", "send", "process"
+	char const			*name2;			//!< The packet type i.e Access-Request, Access-Reject.
 
-	module_method_t		method;			//!< Module method to call
+	module_method_t			method;			//!< Module method to call
+	call_method_env_t const		*method_env;		//!< Call specific conf parsing.
 };
 
 #define MODULE_NAME_TERMINATOR { NULL }
@@ -246,25 +249,25 @@ typedef struct {
  * @{
  */
 int		module_submodule_parse(UNUSED TALLOC_CTX *ctx, void *out, void *parent,
-				       CONF_ITEM *ci, UNUSED CONF_PARSER const *rule);
+				       CONF_ITEM *ci, UNUSED CONF_PARSER const *rule) CC_HINT(warn_unused_result);
 /** @} */
 
 /** @name Module and module thread lookup
  *
  * @{
  */
-module_instance_t	*module_parent(module_instance_t const *child);
+module_instance_t	*module_parent(module_instance_t const *child) CC_HINT(warn_unused_result);
 
-module_instance_t	*module_root(module_instance_t const *child);
+module_instance_t	*module_root(module_instance_t const *child); CC_HINT(warn_unused_result)
 
 module_instance_t	*module_by_name(module_list_t const *ml, module_instance_t const *parent, char const *asked_name)
-			CC_HINT(nonnull(1,3));
+			CC_HINT(nonnull(1,3)) CC_HINT(warn_unused_result);
 
-module_instance_t	*module_by_data(module_list_t const *ml, void const *data);
+module_instance_t	*module_by_data(module_list_t const *ml, void const *data) CC_HINT(warn_unused_result);
 
-module_thread_instance_t *module_thread(module_instance_t *mi);
+module_thread_instance_t *module_thread(module_instance_t *mi) CC_HINT(warn_unused_result);
 
-module_thread_instance_t *module_thread_by_data(module_list_t const *ml, void const *data);
+module_thread_instance_t *module_thread_by_data(module_list_t const *ml, void const *data) CC_HINT(warn_unused_result);
 /** @} */
 
 /** @name Module and module thread initialisation and instantiation
@@ -275,24 +278,24 @@ void		module_free(module_instance_t *mi);
 
 void		modules_thread_detach(module_list_t const *ml);
 
-int		modules_thread_instantiate(TALLOC_CTX *ctx, module_list_t const *ml, fr_event_list_t *el) CC_HINT(nonnull);
+int		modules_thread_instantiate(TALLOC_CTX *ctx, module_list_t const *ml, fr_event_list_t *el) CC_HINT(nonnull) CC_HINT(warn_unused_result);
 
-int		module_instantiate(module_instance_t *mi) CC_HINT(nonnull);
+int		module_instantiate(module_instance_t *mi) CC_HINT(nonnull) CC_HINT(warn_unused_result);
 
-int		modules_instantiate(module_list_t const *ml) CC_HINT(nonnull);
+int		modules_instantiate(module_list_t const *ml) CC_HINT(nonnull) CC_HINT(warn_unused_result);
 
-int		module_bootstrap(module_instance_t *mi) CC_HINT(nonnull);
+int		module_bootstrap(module_instance_t *mi) CC_HINT(nonnull) CC_HINT(warn_unused_result);
 
-int		modules_bootstrap(module_list_t const *ml) CC_HINT(nonnull);
+int		modules_bootstrap(module_list_t const *ml) CC_HINT(nonnull) CC_HINT(warn_unused_result);
 
-int		module_conf_parse(module_instance_t *mi, CONF_SECTION *mod_cs) CC_HINT(nonnull);
+int		module_conf_parse(module_instance_t *mi, CONF_SECTION *mod_cs) CC_HINT(nonnull) CC_HINT(warn_unused_result);
 
 module_instance_t *module_alloc(module_list_t *ml,
 			        module_instance_t const *parent,
 			        dl_module_type_t type, char const *mod_name, char const *inst_name)
-			        CC_HINT(nonnull(1));
+			        CC_HINT(nonnull(1)) CC_HINT(warn_unused_result);
 
-module_list_t	*module_list_alloc(TALLOC_CTX *ctx, char const *name);
+module_list_t	*module_list_alloc(TALLOC_CTX *ctx, char const *name) CC_HINT(warn_unused_result);
 
 void		modules_init(char const *lib_dir);
 /** @} */

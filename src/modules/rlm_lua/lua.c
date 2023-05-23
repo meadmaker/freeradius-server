@@ -186,6 +186,7 @@ DIAG_ON(type-limits)
  * Convert Lua values back to fr_pair_ts. How the Lua value is converted is dependent
  * on the type of the DA.
  *
+ * @param[in] ctx	To allocate new fr_pair_t in.
  * @param[out] out	Where to write a pointer to the new fr_pair_t.
  * @param[in] inst	the current instance.
  * @param[in] request	the current request.
@@ -728,7 +729,7 @@ static void _lua_fr_request_register(lua_State *L, request_t *request)
 		lua_setfield(L, -2, "pairs");
 
 		lua_newtable(L);		/* Attribute list meta-table */
-		lua_pushinteger(L, PAIR_LIST_REQUEST);
+		lua_pushinteger(L, request_attr_request->attr);
 		lua_pushcclosure(L, _lua_pair_accessor_init, 1);
 		lua_setfield(L, -2, "__index");
 		lua_setmetatable(L, -2);
@@ -873,7 +874,7 @@ static void fr_lua_rcode_register(lua_State *L, char const *name)
  * Creates a new lua_State and verifies all required functions have been loaded correctly.
  *
  * @param[in] out	Where to write a pointer to the new state.
- * @parma[in] mctx	configuration data for the
+ * @param[in] mctx	configuration data for the
  * @return 0 on success else -1.
  */
 int fr_lua_init(lua_State **out, module_inst_ctx_t const *mctx)

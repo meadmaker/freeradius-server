@@ -112,6 +112,7 @@ typedef struct {
 /** Called when a timer event fires
  *
  * @param[in] now	The current time.
+ * @param[in] el	Event list the timer event was inserted into.
  * @param[in] uctx	User ctx passed to #fr_event_timer_in or #fr_event_timer_at.
  */
 typedef	void (*fr_event_timer_cb_t)(fr_event_list_t *el, fr_time_t now, void *uctx);
@@ -254,6 +255,8 @@ int		_fr_event_timer_in(NDEBUG_LOCATION_ARGS
 #define		fr_event_timer_in(...) _fr_event_timer_in(NDEBUG_LOCATION_EXP __VA_ARGS__)
 
 int		fr_event_timer_delete(fr_event_timer_t const **ev);
+
+fr_time_t	fr_event_timer_when(fr_event_timer_t const *ev) CC_HINT(nonnull);
 
 int		_fr_event_pid_wait(NDEBUG_LOCATION_ARGS
 				   TALLOC_CTX *ctx, fr_event_list_t *el, fr_event_pid_t const **ev_p,

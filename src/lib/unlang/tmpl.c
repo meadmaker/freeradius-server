@@ -47,7 +47,7 @@ RCSID("$Id$")
  * @param[in] frame		being signalled.
  * @param[in] action		to signal.
  */
-static void unlang_tmpl_signal(request_t *request, unlang_stack_frame_t *frame, fr_state_signal_t action)
+static void unlang_tmpl_signal(request_t *request, unlang_stack_frame_t *frame, fr_signal_t action)
 {
 	unlang_frame_state_tmpl_t	*state = talloc_get_type_abort(frame->state,
 								       unlang_frame_state_tmpl_t);
@@ -55,7 +55,7 @@ static void unlang_tmpl_signal(request_t *request, unlang_stack_frame_t *frame, 
 	/*
 	 *	If we're cancelled, then kill any child processes
 	 */
-	if ((action == FR_SIGNAL_CANCEL) && state->exec.request) fr_exec_cleanup(&state->exec, SIGKILL);
+	if ((action == FR_SIGNAL_CANCEL) && state->exec.request) fr_exec_oneshot_cleanup(&state->exec, SIGKILL);
 
 	if (!state->signal) return;
 
@@ -63,7 +63,7 @@ static void unlang_tmpl_signal(request_t *request, unlang_stack_frame_t *frame, 
 
 	/*
 	 *	If we're cancelled then disable this signal handler.
-	 *	fr_exec_cleanup should handle being called spuriously.
+	 *	fr_exec_oneshot_cleanup should handle being called spuriously.
 	 */
 	if (action == FR_SIGNAL_CANCEL) state->signal = NULL;
 }
@@ -173,7 +173,7 @@ static unlang_action_t unlang_tmpl_exec_wait_resume(rlm_rcode_t *p_result, reque
 {
 	unlang_frame_state_tmpl_t	*state = talloc_get_type_abort(frame->state, unlang_frame_state_tmpl_t);
 
-	if (fr_exec_start(state->ctx, &state->exec, request,
+	if (fr_exec_oneshot(state->ctx, &state->exec, request,
 			  &state->list,
 			  state->args.exec.env, false, false,
 			  false,
@@ -255,7 +255,7 @@ push:
  * @param[in] args		where the status of exited programs will be stored.
  *				Used only for #TMPL_TYPE_EXEC.
  */
-unlang_action_t unlang_tmpl_push(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, request_t *request,
+unlang_action_t unlang_tmpl_push(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *request,
 				 tmpl_t const *tmpl, unlang_tmpl_args_t *args)
 {
 	unlang_stack_t			*stack = request->stack;

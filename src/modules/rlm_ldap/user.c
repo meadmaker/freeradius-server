@@ -35,129 +35,57 @@ USES_APPLE_DEPRECATED_API
 
 #include "rlm_ldap.h"
 
-/** Retrieve the DN of a user object
+/** Holds state of user searches in progress
  *
- * Retrieves the DN of a user and adds it to the control list as LDAP-UserDN. Will also retrieve any
- * attributes passed and return the result in *result.
- *
- * This potentially allows for all authorization and authentication checks to be performed in one
- * ldap search operation, which is a big bonus given the number of crappy, slow *cough*AD*cough*
- * LDAP directory servers out there.
- *
- * @param[in] inst rlm_ldap configuration.
- * @param[in] request Current request.
- * @param[in] ttrunk LDAP thread trunk to use.
- * @param[in] attrs Additional attributes to retrieve, may be NULL.
- * @param[in] force Query even if the User-DN already exists.
- * @param[out] result Where to write the result, may be NULL in which case result is discarded.
- * @param[out] rcode The status of the operation, one of the RLM_MODULE_* codes.
- * @return The user's DN or NULL on error.
  */
-char const *rlm_ldap_find_user(rlm_ldap_t const *inst, request_t *request, fr_ldap_thread_trunk_t *ttrunk,
-			       char const *attrs[], bool force, LDAPMessage **result, LDAP **handle, rlm_rcode_t *rcode)
+typedef struct {
+	rlm_ldap_t const	*inst;
+	fr_ldap_thread_trunk_t	*ttrunk;
+	char const		*base_dn;
+	char const		*filter;
+	char const * const	*attrs;
+	fr_ldap_query_t		*query;
+	fr_ldap_query_t		**out;
+} ldap_user_find_ctx_t;
+
+/** Process the results of an async user lookup
+ *
+ */
+static unlang_action_t ldap_find_user_async_result(rlm_rcode_t *p_result, UNUSED int *priority, request_t *request, void *uctx)
 {
-	static char const *tmp_attrs[] = { NULL };
+	ldap_user_find_ctx_t	*user_ctx = talloc_get_type_abort(uctx, ldap_user_find_ctx_t);
+	fr_ldap_query_t		*query = user_ctx->query;
+	LDAPMessage		*entry;
+	int			cnt, ldap_errno;
+	char			*dn;
+	fr_pair_t		*vp;
 
-	fr_pair_t	*vp = NULL;
-	LDAPMessage	*tmp_msg = NULL, *entry = NULL;
-	int		ldap_errno;
-	int		cnt;
-	char		*dn = NULL;
-	char const	*filter = NULL;
-	char	    	filter_buff[LDAP_MAX_FILTER_STR_LEN];
-	char const	*base_dn;
-	char	    	base_dn_buff[LDAP_MAX_DN_STR_LEN];
-	LDAPControl	*serverctrls[] = { inst->userobj_sort_ctrl, NULL };
-	fr_ldap_query_t	*query = NULL;
+	cnt = ldap_count_entries(query->ldap_conn->handle, query->result);
+	if (cnt == 0) RETURN_MODULE_NOTFOUND;
 
-	bool freeit = false;					//!< Whether the message should
-								//!< be freed after being processed.
-
-	*rcode = RLM_MODULE_FAIL;
-
-	if (!result) {
-		result = &tmp_msg;
-		freeit = true;
-	}
-	*result = NULL;
-
-	if (!attrs) {
-		memset(&attrs, 0, sizeof(tmp_attrs));
-	}
-
-	/*
-	 *	If the caller isn't looking for the result we can just return the current userdn value.
-	 */
-	if (!force) {
-		vp = fr_pair_find_by_da(&request->control_pairs, NULL, attr_ldap_userdn);
-		if (vp) {
-			RDEBUG2("Using user DN from request \"%pV\"", &vp->data);
-			*rcode = RLM_MODULE_OK;
-			return vp->vp_strvalue;
+	if ((!user_ctx->inst->userobj_sort_ctrl) && (cnt > 1)) {
+		REDEBUG("Ambiguous search result, returned %i unsorted entries (should return 1 or 0).  "
+			"Enable sorting, or specify a more restrictive base_dn, filter or scope", cnt);
+		REDEBUG("The following entries were returned:");
+		RINDENT();
+		for (entry = ldap_first_entry(query->ldap_conn->handle, query->result);
+		     entry;
+		     entry = ldap_next_entry(query->ldap_conn->handle, entry)) {
+			dn = ldap_get_dn(query->ldap_conn->handle, entry);
+			REDEBUG("%s", dn);
+			ldap_memfree(dn);
 		}
+		REXDENT();
+		RETURN_MODULE_INVALID;
 	}
 
-	if (inst->userobj_filter) {
-		if (tmpl_expand(&filter, filter_buff, sizeof(filter_buff), request, inst->userobj_filter,
-				fr_ldap_escape_func, NULL) < 0) {
-			REDEBUG("Unable to create filter");
-			*rcode = RLM_MODULE_INVALID;
-
-			return NULL;
-		}
-	}
-
-	if (tmpl_expand(&base_dn, base_dn_buff, sizeof(base_dn_buff), request,
-			inst->userobj_base_dn, fr_ldap_escape_func, NULL) < 0) {
-		REDEBUG("Unable to create base_dn");
-		*rcode = RLM_MODULE_INVALID;
-
-		return NULL;
-	}
-
-	if (fr_ldap_trunk_search(rcode,
-				 unlang_interpret_frame_talloc_ctx(request), &query ,request, ttrunk, base_dn,
-				 inst->userobj_scope, filter, attrs, serverctrls, NULL, false) < 0) {
-		*rcode = RLM_MODULE_FAIL;
-		return NULL;
-	}
-
-	if (*rcode != RLM_MODULE_OK) return NULL;
-
-	*result = query->result;
-
-	/*
-	 *	Forbid the use of unsorted search results that
-	 *	contain multiple entries, as it's a potential
-	 *	security issue, and likely non deterministic.
-	 */
-	if (!inst->userobj_sort_ctrl) {
-		cnt = ldap_count_entries(query->ldap_conn->handle, *result);
-		if (cnt > 1) {
-			REDEBUG("Ambiguous search result, returned %i unsorted entries (should return 1 or 0).  "
-				"Enable sorting, or specify a more restrictive base_dn, filter or scope", cnt);
-			REDEBUG("The following entries were returned:");
-			RINDENT();
-			for (entry = ldap_first_entry(query->ldap_conn->handle, *result);
-			     entry;
-			     entry = ldap_next_entry(query->ldap_conn->handle, entry)) {
-				dn = ldap_get_dn(query->ldap_conn->handle, entry);
-				REDEBUG("%s", dn);
-				ldap_memfree(dn);
-			}
-			REXDENT();
-			*rcode = RLM_MODULE_INVALID;
-			goto finish;
-		}
-	}
-
-	entry = ldap_first_entry(query->ldap_conn->handle, *result);
+	entry = ldap_first_entry(query->ldap_conn->handle, query->result);
 	if (!entry) {
 		ldap_get_option(query->ldap_conn->handle, LDAP_OPT_RESULT_CODE, &ldap_errno);
 		REDEBUG("Failed retrieving entry: %s",
 			ldap_err2string(ldap_errno));
 
-		goto finish;
+		RETURN_MODULE_FAIL;
 	}
 
 	dn = ldap_get_dn(query->ldap_conn->handle, entry);
@@ -165,7 +93,7 @@ char const *rlm_ldap_find_user(rlm_ldap_t const *inst, request_t *request, fr_ld
 		ldap_get_option(query->ldap_conn->handle, LDAP_OPT_RESULT_CODE, &ldap_errno);
 		REDEBUG("Retrieving object DN from entry failed: %s", ldap_err2string(ldap_errno));
 
-		goto finish;
+		RETURN_MODULE_FAIL;
 	}
 	fr_ldap_util_normalise_dn(dn, dn);
 
@@ -173,17 +101,77 @@ char const *rlm_ldap_find_user(rlm_ldap_t const *inst, request_t *request, fr_ld
 
 	MEM(pair_update_control(&vp, attr_ldap_userdn) >= 0);
 	fr_pair_value_strdup(vp, dn, false);
-	if (handle) *handle = query->ldap_conn->handle;
-
 	ldap_memfree(dn);
+	if (user_ctx->out) *user_ctx->out = user_ctx->query;
 
-finish:
+	RETURN_MODULE_OK;
+}
+
+/** Cancel a user search
+ */
+static void ldap_find_user_async_cancel(UNUSED request_t *request, UNUSED fr_signal_t action, void *uctx)
+{
+	ldap_user_find_ctx_t	*user_ctx = talloc_get_type_abort(uctx, ldap_user_find_ctx_t);
+
 	/*
-	 *	Actual freeing of the result is handled by the query destructor
+	 *	If the query is not in flight, just return
 	 */
-	if ((freeit || (*rcode != RLM_MODULE_OK)) && *result) *result = NULL;
+	if (!user_ctx->query || !user_ctx->query->treq) return;
 
-	return vp ? vp->vp_strvalue : NULL;
+	fr_trunk_request_signal_cancel(user_ctx->query->treq);
+}
+
+/** Initiate asynchronous retrieval of the DN of a user object
+ *
+ * Retrieves the DN of a user and adds it to the control list as LDAP-UserDN.
+ * Will also retrieve any attributes passed.
+ *
+ * This potentially allows for all authorization and authentication checks to be performed in one
+ * ldap search operation, which is a big bonus given the number of crappy, slow *cough*AD*cough*
+ * LDAP directory servers out there.
+ *
+ * @param[in] ctx	in which to allocate the query.
+ * @param[in] inst	rlm_ldap configuration.
+ * @param[in] request	Current request.
+ * @param[in] base	DN to search in.
+ * @param[in] filter	to use in LDAP search.
+ * @param[in] ttrunk	LDAP thread trunk to use.
+ * @param[in] attrs	Additional attributes to retrieve, may be NULL.
+ * @param[in] query_out	Where to put a pointer to the LDAP query structure -
+ *			for extracting extra returned attributes, may be NULL.
+ * @return
+ *	- UNLANG_ACTION_PUSHED_CHILD on success.
+ *	- UNLANG_ACTION_FAIL on failure.
+ */
+unlang_action_t rlm_ldap_find_user_async(TALLOC_CTX *ctx, rlm_ldap_t const *inst, request_t *request,
+					 fr_value_box_t *base, fr_value_box_t *filter,
+					 fr_ldap_thread_trunk_t *ttrunk, char const *attrs[], fr_ldap_query_t **query_out)
+{
+	static char const	*tmp_attrs[] = { NULL };
+	ldap_user_find_ctx_t	*user_ctx;
+	LDAPControl		*serverctrls[] = { inst->userobj_sort_ctrl, NULL };
+
+	if (!attrs) memset(&attrs, 0, sizeof(tmp_attrs));
+
+	user_ctx = talloc_zero(ctx, ldap_user_find_ctx_t);
+	*user_ctx = (ldap_user_find_ctx_t) {
+		.inst = inst,
+		.ttrunk = ttrunk,
+		.base_dn = base->vb_strvalue,
+		.attrs = attrs,
+		.out = query_out
+	};
+
+	if (filter) user_ctx->filter = filter->vb_strvalue;
+	if (unlang_function_push(request, NULL, ldap_find_user_async_result, ldap_find_user_async_cancel,
+				 ~FR_SIGNAL_CANCEL, UNLANG_SUB_FRAME, user_ctx) < 0) {
+		talloc_free(user_ctx);
+		return UNLANG_ACTION_FAIL;
+	}
+
+	return fr_ldap_trunk_search(NULL, user_ctx, &user_ctx->query, request, user_ctx->ttrunk,
+				    user_ctx->base_dn, user_ctx->inst->userobj_scope, user_ctx->filter,
+				    user_ctx->attrs, serverctrls, NULL);
 }
 
 /** Check for presence of access attribute in result

@@ -2,6 +2,7 @@ TARGET		:= libfreeradius-unlang$(L)
 
 SOURCES	:=	base.c \
 		call.c \
+		call_env.c \
 		caller.c \
 		compile.c \
 		condition.c \
@@ -26,13 +27,16 @@ SOURCES	:=	base.c \
 		tmpl.c \
 		variable.c \
 		xlat.c \
+		xlat_alloc.c \
 		xlat_builtin.c \
 		xlat_eval.c \
 		xlat_expr.c \
+		xlat_func.c \
 		xlat_inst.c \
-		xlat_tokenize.c \
 		xlat_pair.c \
-		xlat_purify.c
+		xlat_purify.c \
+		xlat_redundant.c \
+		xlat_tokenize.c
 
 HEADERS		:= $(subst src/lib/,,$(wildcard src/lib/unlang/*.h))
 

@@ -152,10 +152,12 @@ typedef struct {
 	process_radius_auth_t		auth;		//!< Authentication configuration.
 } process_radius_t;
 
+#define FR_RADIUS_PROCESS_CODE_VALID(_x) (FR_RADIUS_PACKET_CODE_VALID(_x) || (_x == FR_RADIUS_CODE_DO_NOT_RESPOND))
+
 #define PROCESS_PACKET_TYPE		fr_radius_packet_code_t
 #define PROCESS_CODE_MAX		FR_RADIUS_CODE_MAX
 #define PROCESS_CODE_DO_NOT_RESPOND	FR_RADIUS_CODE_DO_NOT_RESPOND
-#define PROCESS_PACKET_CODE_VALID	FR_RADIUS_PACKET_CODE_VALID
+#define PROCESS_PACKET_CODE_VALID	FR_RADIUS_PROCESS_CODE_VALID
 #define PROCESS_INST			process_radius_t
 #include <freeradius-devel/server/process.h>
 
@@ -248,7 +250,7 @@ static char *auth_name(char *buf, size_t buflen, request_t *request)
 	fr_pair_t	*pair;
 	uint32_t	port = 0;	/* RFC 2865 NAS-Port is 4 bytes */
 	char const	*tls = "";
-	RADCLIENT	*client = client_from_request(request);
+	fr_client_t	*client = client_from_request(request);
 
 	cli = fr_pair_find_by_da(&request->request_pairs, NULL, attr_calling_station_id);
 
@@ -401,7 +403,7 @@ RESUME(access_request)
 	 */
 	if (request->reply->code == FR_RADIUS_CODE_ACCESS_REJECT) {
 		RDEBUG("The 'recv Access-Request' section returned %s - rejecting the request",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+		       fr_table_str_by_value(rcode_table, rcode, "<INVALID>"));
 
 	send_reply:
 		UPDATE_STATE(reply);
@@ -410,9 +412,7 @@ RESUME(access_request)
 		return CALL_SEND_STATE(state);
 	}
 
-	if (request->reply->code == FR_RADIUS_CODE_DO_NOT_RESPOND) {
-		RDEBUG("The 'recv Access-Request' section returned %s - not sending a response",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+	if (request->reply->code) {
 		goto send_reply;
 	}
 
@@ -421,14 +421,10 @@ RESUME(access_request)
 	 */
 	if (!request->reply->code) {
 		vp = fr_pair_find_by_da(&request->reply_pairs, NULL, attr_packet_type);
-		if (vp && FR_RADIUS_PACKET_CODE_VALID(vp->vp_uint32)) {
+		if (vp && FR_RADIUS_PROCESS_CODE_VALID(vp->vp_uint32)) {
 			request->reply->code = vp->vp_uint32;
+			goto send_reply;
 		}
-	}
-
-	if (request->reply->code) {
-		RDEBUG("Reply packet type was set to %s", fr_radius_packet_names[request->reply->code]);
-		goto send_reply;
 	}
 
 	/*
@@ -439,8 +435,7 @@ RESUME(access_request)
 	 */
 	vp = fr_pair_find_by_da(&request->control_pairs, NULL, attr_auth_type);
 	if (!vp) {
-		RDEBUG("No 'Auth-Type' attribute found, cannot authenticate the user - rejecting the request",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+		RDEBUG("No 'Auth-Type' attribute found, cannot authenticate the user - rejecting the request");
 
 	reject:
 		request->reply->code = FR_RADIUS_CODE_ACCESS_REJECT;
@@ -449,8 +444,7 @@ RESUME(access_request)
 
 	dv = fr_dict_enum_by_value(vp->da, &vp->data);
 	if (!dv) {
-		RDEBUG("Invalid value for 'Auth-Type' attribute, cannot authenticate the user - rejecting the request",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+		RDEBUG("Invalid value for 'Auth-Type' attribute, cannot authenticate the user - rejecting the request");
 
 		goto reject;
 	}
@@ -486,7 +480,7 @@ RESUME(access_request)
 	RDEBUG("Running 'authenticate %s' from file %s", cf_section_name2(cs), cf_filename(cs));
 	return unlang_module_yield_to_section(p_result, request,
 					      cs, RLM_MODULE_NOOP, resume_auth_type,
-					      NULL, mctx->rctx);
+					      NULL, 0, mctx->rctx);
 }
 
 RESUME(auth_type)
@@ -515,7 +509,7 @@ RESUME(auth_type)
 		UPDATE_STATE(reply);
 
 		RDEBUG("The 'authenticate' section returned %s - not sending a response",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+		       fr_table_str_by_value(rcode_table, rcode, "<INVALID>"));
 
 		fr_assert(state->send != NULL);
 		return state->send(p_result, mctx, request);
@@ -676,7 +670,7 @@ RESUME(acct_type)
 	PROCESS_TRACE;
 
 	fr_assert(rcode < RLM_MODULE_NUMCODES);
-	fr_assert(FR_RADIUS_PACKET_CODE_VALID(request->reply->code));
+	fr_assert(FR_RADIUS_PROCESS_CODE_VALID(request->reply->code));
 
 	if (acct_type_rcode[rcode]) {
 		fr_assert(acct_type_rcode[rcode] == FR_RADIUS_CODE_DO_NOT_RESPOND);
@@ -685,7 +679,7 @@ RESUME(acct_type)
 		UPDATE_STATE(reply);
 
 		RDEBUG("The 'accounting' section returned %s - not sending a response",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+		       fr_table_str_by_value(rcode_table, rcode, "<INVALID>"));
 
 		fr_assert(state->send != NULL);
 		return state->send(p_result, mctx, request);
@@ -719,7 +713,7 @@ RESUME(accounting_request)
 
 	if (request->reply->code == FR_RADIUS_CODE_DO_NOT_RESPOND) {
 		RDEBUG("The 'recv Accounting-Request' section returned %s - not sending a response",
-		       fr_table_str_by_value(rcode_table, rcode, "???"));
+		       fr_table_str_by_value(rcode_table, rcode, "<INVALID>"));
 
 	send_reply:
 		fr_assert(state->send != NULL);
@@ -748,7 +742,7 @@ RESUME(accounting_request)
 	 */
 	return unlang_module_yield_to_section(p_result, request,
 					      cs, RLM_MODULE_NOOP, resume_acct_type,
-					      NULL, mctx->rctx);
+					      NULL, 0, mctx->rctx);
 }
 
 #if 0
@@ -838,7 +832,7 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 {
 	process_radius_t	*inst = talloc_get_type_abort(mctx->inst->data, process_radius_t);
 
-	inst->server_cs = cf_section_find_in_parent(mctx->inst->conf, "server", CF_IDENT_ANY);
+	inst->server_cs = cf_item_to_section(cf_parent(mctx->inst->conf));
 	if (virtual_server_section_attribute_define(inst->server_cs, "authenticate", attr_auth_type) < 0) return -1;
 
 	return 0;

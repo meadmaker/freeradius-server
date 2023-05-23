@@ -2095,7 +2095,7 @@ static inline int fr_value_box_cast_to_strvalue(TALLOC_CTX *ctx, fr_value_box_t 
 
 	case FR_TYPE_GROUP:
 		return fr_value_box_list_concat_in_place(ctx,
-							 dst, UNCONST(FR_DLIST_HEAD(fr_value_box_list) *, &src->vb_group),
+							 dst, UNCONST(fr_value_box_list_t *, &src->vb_group),
 							 FR_TYPE_STRING,
 							 FR_VALUE_BOX_LIST_NONE, false,
 							 SIZE_MAX);
@@ -2144,7 +2144,7 @@ static inline int fr_value_box_cast_to_octets(TALLOC_CTX *ctx, fr_value_box_t *d
 
 	case FR_TYPE_GROUP:
 		return fr_value_box_list_concat_in_place(ctx,
-							 dst, UNCONST(FR_DLIST_HEAD(fr_value_box_list) *, &src->vb_group),
+							 dst, UNCONST(fr_value_box_list_t *, &src->vb_group),
 							 FR_TYPE_OCTETS,
 							 FR_VALUE_BOX_LIST_NONE, false,
 							 SIZE_MAX);
@@ -3401,7 +3401,7 @@ int fr_value_box_cast_in_place(TALLOC_CTX *ctx, fr_value_box_t *vb,
 	/*
 	 *	Store list poiters to restore later - fr_value_box_cast clears them
 	 */
-	FR_DLIST_ENTRY(fr_value_box_list) entry = vb->entry;
+	fr_value_box_entry_t entry = vb->entry;
 
 	/*
 	 *	Simple case, destination type and current
@@ -4481,7 +4481,9 @@ void fr_value_box_increment(fr_value_box_t *vb)
  *
  * @param[out] dst		where to write parsed value.
  * @param[in] dst_type		type of integer to convert string to.
+ * @param[in] dst_enumv		Enumeration values.
  * @param[in] in		String to convert to integer.
+ * @param[in] rules		for parsing string.
  * @param[in] tainted		Whether the value came from a trusted source.
  * @return
  *	- >= 0 on success (number of bytes parsed).
@@ -5243,7 +5245,7 @@ ssize_t fr_value_box_print(fr_sbuff_t *out, fr_value_box_t const *data, fr_sbuff
 		 */
 		FR_SBUFF_IN_CHAR_RETURN(&our_out, '{');
 		FR_SBUFF_RETURN(fr_value_box_list_concat_as_string,
-				NULL, &our_out, UNCONST(FR_DLIST_HEAD(fr_value_box_list) *, &data->vb_group),
+				NULL, &our_out, UNCONST(fr_value_box_list_t *, &data->vb_group),
 				", ", (sizeof(", ") - 1), e_rules,
 				0, false, true);
 		FR_SBUFF_IN_CHAR_RETURN(&our_out, '}');
@@ -5314,14 +5316,14 @@ ssize_t fr_value_box_print_quoted(fr_sbuff_t *out, fr_value_box_t const *data, f
  *				they've been processed.
  * @param[in] flatten		If true and we encounter a #FR_TYPE_GROUP,
  *				we concat the contents of its children together.
- *      			If false, the contents will be cast to #type.
+ *      			If false, the contents will be cast to #FR_TYPE_STRING.
  * @param[in] printable		Convert 'octets' to printable strings.
  * @return
  *      - >=0 the number of bytes written to the sbuff.
  *	- <0 how many additional bytes we would have needed to
  *	  concat the next box.
  */
-ssize_t fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, FR_DLIST_HEAD(fr_value_box_list) *list,
+ssize_t fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, fr_value_box_list_t *list,
 					   char const *sep, size_t sep_len, fr_sbuff_escape_rules_t const *e_rules,
 					   fr_value_box_list_action_t proc_action, bool flatten, bool printable)
 {
@@ -5357,6 +5359,9 @@ ssize_t fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, FR_
 
 			slen = fr_sbuff_in_bstrncpy(&our_sbuff, vb->vb_strvalue, vb->vb_length);
 			break;
+
+		case FR_TYPE_NULL:	/* Skip null */
+			continue;
 
 		default:
 		print:
@@ -5404,13 +5409,13 @@ ssize_t fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, FR_
  *				they've been processed.
  * @param[in] flatten		If true and we encounter a #FR_TYPE_GROUP,
  *				we concat the contents of its children together.
- *      			If false, the contents will be cast to #type.
+ *      			If false, the contents will be cast to #FR_TYPE_OCTETS.
  * @return
  *      - >=0 the number of bytes written to the sbuff.
  *	- <0 how many additional bytes we would have needed to
  *	  concat the next box.
  */
-ssize_t fr_value_box_list_concat_as_octets(bool *tainted, fr_dbuff_t *dbuff, FR_DLIST_HEAD(fr_value_box_list) *list,
+ssize_t fr_value_box_list_concat_as_octets(bool *tainted, fr_dbuff_t *dbuff, fr_value_box_list_t *list,
 					   uint8_t const *sep, size_t sep_len,
 					   fr_value_box_list_action_t proc_action, bool flatten)
 {
@@ -5436,6 +5441,9 @@ ssize_t fr_value_box_list_concat_as_octets(bool *tainted, fr_dbuff_t *dbuff, FR_
 		case FR_TYPE_STRING:
 			slen = fr_dbuff_in_memcpy(&our_dbuff, (uint8_t const *)vb->vb_strvalue, vb->vb_length);
 			break;
+
+		case FR_TYPE_NULL:	/* Skip null */
+			continue;
 
 		default:
 		cast:
@@ -5500,14 +5508,14 @@ ssize_t fr_value_box_list_concat_as_octets(bool *tainted, fr_dbuff_t *dbuff, FR_
  *				they've been processed.
  * @param[in] flatten		If true and we encounter a #FR_TYPE_GROUP,
  *				we concat the contents of its children together.
- *      			If false, the contents will be cast to #type.
+ *      			If false, the contents will be cast to the given type.
  * @param[in] max_size		of the value.
  * @return
  *	- 0 on success.
  *	- -1 on failure.
  */
 int fr_value_box_list_concat_in_place(TALLOC_CTX *ctx,
-				      fr_value_box_t *out, FR_DLIST_HEAD(fr_value_box_list) *list, fr_type_t type,
+				      fr_value_box_t *out, fr_value_box_list_t *list, fr_type_t type,
 				      fr_value_box_list_action_t proc_action, bool flatten,
 				      size_t max_size)
 {
@@ -5520,7 +5528,7 @@ int fr_value_box_list_concat_in_place(TALLOC_CTX *ctx,
 	fr_value_box_t			*head_vb = fr_value_box_list_head(list);
 	bool				tainted = false;
 
-	FR_DLIST_ENTRY(fr_value_box_list)	entry;
+	fr_value_box_entry_t		entry;
 
 	if (fr_value_box_list_empty(list)) {
 		fr_strerror_const("Invalid arguments.  List contains no elements");
@@ -5658,6 +5666,29 @@ int fr_value_box_list_concat_in_place(TALLOC_CTX *ctx,
 	return 0;
 }
 
+/** Removes a single layer of nesting, moving all children into the parent list
+ *
+ * @param[in] ctx	to reparent children in if steal is true.
+ * @param[in] list	to flatten.
+ * @param[in] steal	whether to change the talloc ctx of children.
+ * @param[in] free	whether to free any group boxes which have had
+ *			their children removed.
+ */
+void fr_value_box_flatten(TALLOC_CTX *ctx, fr_value_box_list_t *list, bool steal, bool free)
+{
+	fr_value_box_list_foreach_safe(list, child) {
+		if (!fr_type_is_structural(child->type)) continue;
+
+		fr_value_box_list_foreach_safe(&child->vb_group, grandchild) {
+			fr_value_box_list_remove(&child->vb_group, grandchild);
+			if (steal) talloc_steal(ctx, grandchild);
+			fr_value_box_list_insert_before(list, child, grandchild);
+		}}
+
+		if (free) talloc_free(child);
+	}}
+}
+
 /** Concatenate the string representations of a list of value boxes together
  *
  * @param[in] ctx	to allocate the buffer in.
@@ -5668,7 +5699,7 @@ int fr_value_box_list_concat_in_place(TALLOC_CTX *ctx,
  *	- NULL on error.
  *	- The concatenation of the string values of the value box list on success.
  */
-char *fr_value_box_list_aprint(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) const *list, char const *delim,
+char *fr_value_box_list_aprint(TALLOC_CTX *ctx, fr_value_box_list_t const *list, char const *delim,
 			       fr_sbuff_escape_rules_t const *e_rules)
 {
 	fr_value_box_t const	*vb = fr_value_box_list_head(list);
@@ -5740,7 +5771,7 @@ uint32_t fr_value_box_hash(fr_value_box_t const *vb)
  *	- A duplicate list of value boxes, allocated in the context of 'ctx'
  *	- NULL on error, or empty input list.
  */
-int fr_value_box_list_acopy(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *out, FR_DLIST_HEAD(fr_value_box_list) const *in)
+int fr_value_box_list_acopy(TALLOC_CTX *ctx, fr_value_box_list_t *out, fr_value_box_list_t const *in)
 {
 	fr_value_box_t const *in_p = NULL;
 
@@ -5768,7 +5799,7 @@ int fr_value_box_list_acopy(TALLOC_CTX *ctx, FR_DLIST_HEAD(fr_value_box_list) *o
  *	- true if a list member is tainted.
  *	- false if no list members are tainted.
  */
-bool fr_value_box_list_tainted(FR_DLIST_HEAD(fr_value_box_list) const *head)
+bool fr_value_box_list_tainted(fr_value_box_list_t const *head)
 {
 	fr_value_box_t *vb = NULL;
 
@@ -5784,7 +5815,7 @@ bool fr_value_box_list_tainted(FR_DLIST_HEAD(fr_value_box_list) const *head)
  *
  * @param[in] head	of list.
  */
-void fr_value_box_list_taint(FR_DLIST_HEAD(fr_value_box_list) *head)
+void fr_value_box_list_taint(fr_value_box_list_t *head)
 {
 	fr_value_box_t *vb = NULL;
 
@@ -5798,7 +5829,7 @@ void fr_value_box_list_taint(FR_DLIST_HEAD(fr_value_box_list) *head)
  *
  * @param[in] head	of list.
  */
-void fr_value_box_list_untaint(FR_DLIST_HEAD(fr_value_box_list) *head)
+void fr_value_box_list_untaint(fr_value_box_list_t *head)
 {
 	fr_value_box_t *vb = NULL;
 
@@ -5811,7 +5842,7 @@ void fr_value_box_list_untaint(FR_DLIST_HEAD(fr_value_box_list) *head)
 /** Validation function to check that a fr_value_box_t is correctly initialised
  *
  */
-void value_box_verify(char const *file, int line, fr_value_box_t const *vb, bool talloced)
+void fr_value_box_verify(char const *file, int line, fr_value_box_t const *vb, bool talloced)
 {
 DIAG_OFF(nonnull-compare)
 	/*
@@ -5844,7 +5875,7 @@ DIAG_ON(nonnull-compare)
 		break;
 
 	case FR_TYPE_GROUP:
-		value_box_list_verify(file, line, &vb->vb_group, talloced);
+		fr_value_box_list_verify(file, line, &vb->vb_group, talloced);
 		break;
 
 	default:
@@ -5852,11 +5883,9 @@ DIAG_ON(nonnull-compare)
 	}
 }
 
-void value_box_list_verify(char const *file, int line, FR_DLIST_HEAD(fr_value_box_list) const *list, bool talloced)
+void fr_value_box_list_verify(char const *file, int line, fr_value_box_list_t const *list, bool talloced)
 {
-	fr_value_box_t const *vb = NULL;
-
-	while ((vb = fr_value_box_list_next(list, vb))) value_box_verify(file, line, vb, talloced);
+	fr_value_box_list_foreach(list, vb) fr_value_box_verify(file, line, vb, talloced);
 }
 
 
@@ -5933,3 +5962,53 @@ bool fr_value_box_is_truthy(fr_value_box_t const *in)
 		return box.vb_bool;
 	}
 }
+
+#define INFO_INDENT(_fmt, ...)  FR_FAULT_LOG("%*s"_fmt, depth * 2, " ", ## __VA_ARGS__)
+
+static void _fr_value_box_debug(fr_value_box_t const *vb, int depth, int idx);
+static void _fr_value_box_list_debug(fr_value_box_list_t const *head, int depth)
+{
+	int i = 0;
+
+	INFO_INDENT("{");
+	fr_value_box_list_foreach(head, vb) _fr_value_box_debug(vb, depth + 1, i++);
+	INFO_INDENT("}");
+}
+
+/** Print a list of value boxes as info messages
+ *
+ * @note Call directly from the debugger
+ */
+void fr_value_box_list_debug(fr_value_box_list_t const *head)
+{
+	_fr_value_box_list_debug(head, 0);
+}
+
+static void _fr_value_box_debug(fr_value_box_t const *vb, int depth, int idx)
+{
+	char *value;
+
+	if (fr_type_is_structural(vb->type)) {
+		_fr_value_box_list_debug(&vb->vb_group, depth + 1);
+		return;
+	}
+
+	fr_value_box_aprint(NULL, &value, vb, NULL);
+	if (idx >= 0) {
+		INFO_INDENT("[%d] %s", idx, value);
+	} else {
+		INFO_INDENT("%s", value);
+	}
+	talloc_free(value);
+}
+
+/** Print the value of a box as info messages
+ *
+ * @note Call directly from the debugger
+ */
+void fr_value_box_debug(fr_value_box_t const *vb)
+{
+	_fr_value_box_debug(vb, 0, -1);
+}
+
+

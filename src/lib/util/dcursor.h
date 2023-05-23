@@ -67,7 +67,8 @@ typedef int (*fr_dcursor_insert_t)(fr_dlist_head_t *list, void *to_insert, void 
  * @param[in] to_delete	The item being removed from the cursor.
  * @param[in] uctx	passed to #fr_dcursor_init.
  * @return
- *	- 0 on success.
+ *	- 0 on success if the caller should do the list removal.
+ *	- 1 on success if the callback has done the list removal.
  *	- -1 on failure.
  */
 typedef int (*fr_dcursor_remove_t)(fr_dlist_head_t *list, void *to_delete, void *uctx);
@@ -136,6 +137,7 @@ static inline void *dcursor_current_set(fr_dcursor_t *cursor, void *current)
 /** Internal function to get the next item
  *
  * @param[in] cursor	to operate on.
+ * @param[in] iter	function.
  * @param[in] current	attribute.
  * @return
  *	- The next attribute.
@@ -450,6 +452,7 @@ static inline int fr_dcursor_insert(fr_dcursor_t *cursor, void *v)
 static inline void *fr_dcursor_remove(fr_dcursor_t *cursor)
 {
 	void *v;
+	int i = 0;
 
 	if (!fr_cond_assert_msg(!cursor->is_const, "attempting to modify const list")) return NULL;
 
@@ -458,9 +461,14 @@ static inline void *fr_dcursor_remove(fr_dcursor_t *cursor)
 	v = cursor->current;
 	VALIDATE(v);
 
-	if (cursor->remove && (cursor->remove(cursor->dlist, v, cursor->mod_uctx) < 0)) return NULL;
+	if (cursor->remove) {
+		i = cursor->remove(cursor->dlist, v, cursor->mod_uctx);
+		if (i < 0) return NULL;
+	}
 
 	dcursor_current_set(cursor, dcursor_next(cursor, cursor->iter, v));
+
+	if (i > 0) return v;
 
 	fr_dlist_remove(cursor->dlist, v);
 
@@ -636,10 +644,13 @@ static inline void fr_dcursor_free_list(fr_dcursor_t *cursor)
 /** Initialise a cursor with a custom iterator
  *
  * @param[in] _cursor		to initialise.
- * @param[in] _head		of item list.
+ * @param[in] _list		to iterate over.
  * @param[in] _iter		function.
  * @param[in] _peek		function.  If NULL _iter will be used for peeking.
  * @param[in] _iter_uctx	_iter function _uctx.
+ * @param[in] _insert		function.
+ * @param[in] _remove		function.
+ * @param[in] _mod_uctx		_insert and _remove function _uctx.
  * @return
  *	- NULL if _head does not point to any items, or the iterator matches no items
  *	  in the current list.
@@ -796,42 +807,42 @@ DIAG_OFF(unused-function)
 /** Expands to the type name used for the dcursor wrapper structure
  *
  * @param[in] _name	Prefix we add to type-specific structures.
- * @return <name>_dcursor_t
+ * @return ``<name>_dcursor_t``
  */
 #define FR_DCURSOR(_name) _name ## _dcursor_t
 
 /** Expands to the type name used for the dcursor iterator type
  *
  * @param[in] _name	Prefix we add to type-specific structures.
- * @return <name>_iter_t
+ * @return ``<name>_iter_t``
  */
 #define FR_DCURSOR_ITER(_name) _name ## _iter_t
 
 /** Expands to the type name used for the dcursor evaluator type
  *
  * @param[in] _name	Prefix we add to type-specific structures.
- * @return <name>_eval_t
+ * @return ``<name>_eval_t``
  */
 #define FR_DCURSOR_EVAL(_name) _name ## _eval_t
 
 /** Expands to the type name used for the dcursor insert function type
  *
  * @param[in] _name	Prefix we add to type-specific structures.
- * @return <name>_insert_t
+ * @return ``<name>_insert_t``
  */
 #define FR_DCURSOR_INSERT(_name) _name ## _insert_t
 
 /** Expands to the type name used for the dcursor remove function type
  *
  * @param[in] _name	Prefix we add to type-specific structures.
- * @return <name>_remove_t
+ * @return ``<name>_remove_t``
  */
 #define FR_DCURSOR_REMOVE(_name) _name ## _remove_t
 
 /** Expands to the type name used for the dcursor copy function type
  *
  * @param[in] _name	Prefix we add to type-specific structures.
- * @return <name>_copy_t
+ * @return ``<name>_copy_t``
  */
 #define FR_DCURSOR_COPY(_name) _name ## _copy_t
 
@@ -844,6 +855,7 @@ DIAG_OFF(unused-function)
  *				- #FR_DLIST_ENTRY
  *				- #FR_DLIST_TYPES
  *				- #FR_DLIST_FUNCS
+ * @param[in] _element_type	Type of element in the dlists.
  *
  * @note This macro should be used inside the header for the area of code
  * which will use type specific functions.

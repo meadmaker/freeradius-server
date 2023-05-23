@@ -468,6 +468,11 @@ request_t *_request_alloc(char const *file, int line, TALLOC_CTX *ctx,
 	fr_dlist_entry_init(&request->free_entry);	/* Needs to be initialised properly, else bad things happen */
 
 	/*
+	 *	This is only used by src/lib/io/worker.c
+	 */
+	fr_dlist_entry_init(&request->listen_entry);
+
+	/*
 	 *	Bind lifetime to a parent.
 	 *
 	 *	If the parent is freed the destructor
@@ -538,6 +543,42 @@ request_t *_request_local_alloc(char const *file, int line, TALLOC_CTX *ctx,
 	return request;
 }
 
+/** Replace the session_state_ctx with a new one.
+ *
+ *  NOTHING should rewrite request->session_state_ctx.
+ *
+ *  It's now a pair, and is stored in request->pair_root.
+ *  So it's wrong for anyone other than this function to play games with it.
+ *
+ * @param[in] request	to replace the state of.
+ * @param[in] new_state	state to assign to the request.
+ *			May be NULL in which case a new_state state will
+ *			be alloced and assigned.
+ *
+ * @return the fr_pair_t containing the old state list.
+ */
+fr_pair_t *request_state_replace(request_t *request, fr_pair_t *new_state)
+{
+	fr_pair_t *old = request->session_state_ctx;
+
+	fr_assert(request->session_state_ctx != NULL);
+	fr_assert(request->session_state_ctx != new_state);
+
+	fr_pair_remove(&request->pair_root->children, old);
+
+	/*
+	 *	Save (or delete) the existing state, and re-initialize
+	 *	it with a brand new one.
+	 */
+	if (!new_state) MEM(new_state = fr_pair_afrom_da(NULL, request_attr_state));
+
+	request->session_state_ctx = new_state;
+
+	fr_pair_append(&request->pair_root->children, new_state);
+
+	return old;
+}
+
 /** Unlink a subrequest from its parent
  *
  * @note This should be used for requests in preparation for freeing them.
@@ -572,6 +613,11 @@ int request_detach(request_t *child)
 	 *	Request is now detached
 	 */
 	child->type = REQUEST_TYPE_DETACHED;
+
+	/*
+	 *	...and is no longer detachable.
+	 */
+	child->flags.detachable = 0;
 
 	return 0;
 }

@@ -41,6 +41,8 @@ RCSID("$Id$")
 #include <freeradius-devel/util/misc.h>
 #include <freeradius-devel/util/sha1.h>
 
+#include <freeradius-devel/unlang/xlat_func.h>
+
 #include <sys/wait.h>
 #include <ctype.h>
 
@@ -303,7 +305,7 @@ static xlat_arg_parser_t const mschap_xlat_args[] = {
  */
 static xlat_action_t mschap_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				 xlat_ctx_t const *xctx,
-				 request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+				 request_t *request, fr_value_box_list_t *in)
 {
 	size_t			data_len;
 	uint8_t const  		*data = NULL;
@@ -322,7 +324,7 @@ static xlat_action_t mschap_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	 *	hash of MS-CHAPv2 challenge, and peer challenge.
 	 */
 	if (strncasecmp(arg->vb_strvalue, "Challenge", 9) == 0) {
-		chap_challenge = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_challenge);
+		chap_challenge = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap_challenge);
 		if (!chap_challenge) {
 			REDEBUG("No MS-CHAP-Challenge in the request");
 			return XLAT_ACTION_FAIL;
@@ -348,7 +350,7 @@ static xlat_action_t mschap_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 			char const	*username_str;
 			size_t		username_len;
 
-			response = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap2_response);
+			response = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap2_response);
 			if (!response) {
 				REDEBUG("Vendor-Specific.Microsoft.CHAP2-Response is required to calculate MS-CHAPv1 challenge");
 				return XLAT_ACTION_FAIL;
@@ -426,8 +428,8 @@ static xlat_action_t mschap_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	 *	response.
 	 */
 	} else if (strncasecmp(arg->vb_strvalue, "NT-Response", 11) == 0) {
-		response = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_response);
-		if (!response) response = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap2_response);
+		response = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap_response);
+		if (!response) response = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap2_response);
 		if (!response) {
 			REDEBUG("No MS-CHAP-Response or MS-CHAP2-Response was found in the request");
 			return XLAT_ACTION_FAIL;
@@ -461,7 +463,7 @@ static xlat_action_t mschap_xlat(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	 *	in MS-CHAPv1, and not often there.
 	 */
 	} else if (strncasecmp(arg->vb_strvalue, "LM-Response", 11) == 0) {
-		response = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_response);
+		response = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap_response);
 		if (!response) {
 			REDEBUG("No MS-CHAP-Response was found in the request");
 			return XLAT_ACTION_FAIL;
@@ -1454,13 +1456,20 @@ static unlang_action_t CC_HINT(nonnull) mod_authorize(rlm_rcode_t *p_result, mod
 {
 	rlm_mschap_t const 	*inst = talloc_get_type_abort_const(mctx->inst->data, rlm_mschap_t);
 	fr_pair_t		*challenge = NULL;
+	fr_pair_t		*parent;
 
-	challenge = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_challenge);
+	challenge = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap_challenge);
 	if (!challenge) RETURN_MODULE_NOOP;
 
-	if (!fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_response) &&
-	    !fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap2_response) &&
-	    !fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap2_cpw)) {
+	/*
+	 *	The responses MUST be in the same group as the challenge.
+	 */
+	parent = fr_pair_parent(challenge);
+	fr_assert(parent != NULL);
+
+	if (!fr_pair_find_by_da(&parent->vp_group, NULL, attr_ms_chap_response) &&
+	    !fr_pair_find_by_da(&parent->vp_group, NULL, attr_ms_chap2_response) &&
+	    !fr_pair_find_by_da(&parent->vp_group, NULL, attr_ms_chap2_cpw)) {
 		RDEBUG2("Found MS-CHAP-Challenge, but no MS-CHAP response or Change-Password");
 		RETURN_MODULE_NOOP;
 	}
@@ -2014,6 +2023,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 	fr_pair_t		*challenge = NULL;
 	fr_pair_t		*response = NULL;
 	fr_pair_t		*cpw = NULL;
+	fr_pair_t		*parent;
 	fr_pair_t		*nt_password = NULL, *smb_ctrl;
 	uint8_t			nthashhash[NT_DIGEST_LENGTH];
 	int			mschap_version = 0;
@@ -2079,7 +2089,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 	 *	Check to see if this is a change password request, and process
 	 *	it accordingly if so.
 	 */
-	cpw = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap2_cpw);
+	cpw = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap2_cpw);
 	if (cpw) {
 		uint8_t		*p;
 
@@ -2111,7 +2121,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 		memcpy(p + 2, cpw->vp_octets + 18, 48);
 	}
 
-	challenge = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_challenge);
+	challenge = fr_pair_find_by_da_nested(&request->request_pairs, NULL, attr_ms_chap_challenge);
 	if (!challenge) {
 		REDEBUG("&control.Auth-Type = %s set for a request that does not contain &%s",
 			mctx->inst->name, attr_ms_chap_challenge->name);
@@ -2120,9 +2130,15 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 	}
 
 	/*
+	 *	The responses MUST be in the same group as the challenge.
+	 */
+	parent = fr_pair_parent(challenge);
+	fr_assert(parent != NULL);
+
+	/*
 	 *	We also require an MS-CHAP-Response.
 	 */
-	if ((response = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap_response))) {
+	if ((response = fr_pair_find_by_da(&parent->vp_group, NULL, attr_ms_chap_response))) {
 		mschap_process_response(&rcode,
 					&mschap_version, nthashhash,
 					inst, request,
@@ -2130,7 +2146,7 @@ static unlang_action_t CC_HINT(nonnull) mod_authenticate(rlm_rcode_t *p_result, 
 					challenge, response,
 					method);
 		if (rcode != RLM_MODULE_OK) goto finish;
-	} else if ((response = fr_pair_find_by_da(&request->request_pairs, NULL, attr_ms_chap2_response))) {
+	} else if ((response = fr_pair_find_by_da_nested(&parent->vp_group, NULL, attr_ms_chap2_response))) {
 		mschap_process_v2_response(&rcode,
 					   &mschap_version, nthashhash,
 					   inst, request,
@@ -2277,8 +2293,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	rlm_mschap_t		*inst = talloc_get_type_abort(mctx->inst->data, rlm_mschap_t);
 	xlat_t			*xlat;
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, mschap_xlat, FR_TYPE_VOID, NULL);
-	xlat_func_args(xlat, mschap_xlat_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, mschap_xlat, FR_TYPE_VOID);
+	xlat_func_args_set(xlat, mschap_xlat_args);
 
 	return 0;
 }

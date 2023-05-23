@@ -35,6 +35,8 @@ RCSID("$Id$")
 #include <freeradius-devel/server/pair.h>
 #include <freeradius-devel/server/virtual_servers.h>
 #include <freeradius-devel/util/atexit.h>
+#include <freeradius-devel/unlang/xlat_func.h>
+#include <freeradius-devel/unlang/xlat_redundant.h>
 
 /** Lookup virtual module by name
  */
@@ -204,7 +206,7 @@ int module_rlm_sibling_section_find(CONF_SECTION **out, CONF_SECTION *module, ch
 			parent = tmp;
 		} while (true);
 
-		module_instantiate(module_by_name(rlm_modules, NULL, inst_name));
+		if (unlikely(module_instantiate(module_by_name(rlm_modules, NULL, inst_name)) < 0)) return -1;
 	}
 
 	/*
@@ -418,6 +420,7 @@ bool module_rlm_section_type_set(request_t *request, fr_dict_attr_t const *type_
  * and ensures the module implements the specified method.
  *
  * @param[out] method		the method function we will call
+ * @param[out] method_env	the module_call_env to evaluate when compiling the method.
  * @param[in,out] component	the default component to use.  Updated to be the found component
  * @param[out] name1		name1 of the method being called
  * @param[out] name2		name2 of the method being called
@@ -428,7 +431,8 @@ bool module_rlm_section_type_set(request_t *request, fr_dict_attr_t const *type_
  *
  *  If the module exists but the method doesn't exist, then `method` is set to NULL.
  */
-module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED rlm_components_t *component,
+module_instance_t *module_rlm_by_name_and_method(module_method_t *method, call_method_env_t const **method_env,
+						 UNUSED rlm_components_t *component,
 						 char const **name1, char const **name2,
 						 char const *name)
 {
@@ -485,6 +489,7 @@ module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED
 			if (methods->name1 == CF_IDENT_ANY) {
 			found:
 				*method = methods->method;
+				if (method_env) *method_env = methods->method_env;
 				if (name1) *name1 = method_name1;
 				if (name2) *name2 = method_name2;
 				return mi;
@@ -592,7 +597,10 @@ module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED
 	 *	doesn't exist.
 	 */
 	p = strchr(name, '.');
-	if (!p) return NULL;
+	if (!p) {
+		fr_strerror_printf("No such module '%s'", name);
+		return NULL;
+	}
 
 	/*
 	 *	The module name may have a '.' in it, AND it may have
@@ -622,6 +630,7 @@ module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED
 	 *	No such module, we're done.
 	 */
 	if (!mi) {
+		fr_strerror_printf("Failed to find module '%s'", inst_name);
 		talloc_free(inst_name);
 		return NULL;
 	}
@@ -685,6 +694,7 @@ module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED
 			*name1 = p;
 			*name2 = NULL;
 			*method = methods->method;
+			if (method_env) *method_env = methods->method_env;
 			break;
 		}
 
@@ -721,7 +731,7 @@ module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED
 		/*
 		 *	If name1 doesn't match, skip it.
 		 */
-		if (strncmp(methods->name1, p, len) != 0) continue;
+		if (strncasecmp(methods->name1, p, len) != 0) continue;
 
 		/*
 		 *	It may have been a partial match, like "rec",
@@ -752,6 +762,7 @@ module_instance_t *module_rlm_by_name_and_method(module_method_t *method, UNUSED
 		*name1 = methods->name1;
 		*name2 = name + (q - inst_name);
 		*method = methods->method;
+		if (method_env) *method_env = methods->method_env;
 		break;
 	}
 
@@ -865,7 +876,7 @@ static int module_rlm_bootstrap_virtual(CONF_SECTION *cs)
 			 *	want to know if we need to register a
 			 *	redundant xlat for the virtual module.
 			 */
-			mi = module_rlm_by_name_and_method(NULL, NULL, NULL, NULL, cf_pair_attr(cp));
+			mi = module_rlm_by_name_and_method(NULL, NULL, NULL, NULL, NULL, cf_pair_attr(cp));
 			if (!mi) {
 				cf_log_err(sub_ci, "Module instance \"%s\" referenced in %s block, does not exist",
 					   cf_pair_attr(cp), cf_section_name1(cs));
@@ -996,7 +1007,7 @@ int modules_rlm_bootstrap(CONF_SECTION *root)
 	     ci = cf_item_next(modules, ci)) {
 		char const *name;
 		CONF_SECTION *subcs;
-		module_instance_t *mi;
+		module_instance_t *mi = NULL;
 
 		/*
 		 *	@todo - maybe this should be a warning?
@@ -1051,22 +1062,25 @@ int modules_rlm_bootstrap(CONF_SECTION *root)
 			return -1;
 		}
 
-		if (module_bootstrap(mi) < 0) {
-			cf_log_perr(subcs, "Failed bootstrapping module");
-			goto error;
-		}
-
 		/*
 		 *	Compile the default "actions" subsection, which includes retries.
 		 */
 		actions = cf_section_find(subcs, "actions", NULL);
-		if (actions && unlang_compile_actions(&mi->actions, actions, (mi->module->type & MODULE_TYPE_RETRY) != 0)) {
-			talloc_free(mi);
-			goto error;
-		}
+		if (actions && unlang_compile_actions(&mi->actions, actions, (mi->module->type & MODULE_TYPE_RETRY) != 0)) goto error;
 	}
 
-	cf_log_debug(modules, " } # modules");
+	/*
+	 *	Having parsed all the modules, bootstrap them.
+	 *	This needs to be after parsing so that submodules can access
+	 *	their parent's fully parsed data.
+	 */
+	{
+		int ret = modules_bootstrap(rlm_modules);
+
+		cf_log_debug(modules, " } # modules");
+
+		if (unlikely(ret < 0)) return -1;
+	}
 
 	if (fr_command_register_hook(NULL, NULL, modules, module_cmd_list_table) < 0) {
 		PERROR("Failed registering radmin commands for modules");

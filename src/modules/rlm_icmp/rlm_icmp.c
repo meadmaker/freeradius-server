@@ -29,6 +29,7 @@ RCSID("$Id$")
 #include <freeradius-devel/server/module_rlm.h>
 #include <freeradius-devel/util/cap.h>
 #include <freeradius-devel/util/debug.h>
+#include <freeradius-devel/unlang/xlat_func.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -111,7 +112,7 @@ static const CONF_PARSER module_config[] = {
 
 static xlat_action_t xlat_icmp_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 				      xlat_ctx_t const *xctx,
-				      UNUSED request_t *request, UNUSED FR_DLIST_HEAD(fr_value_box_list) *in)
+				      UNUSED request_t *request, UNUSED fr_value_box_list_t *in)
 {
 	rlm_icmp_echo_t *echo = talloc_get_type_abort(xctx->rctx, rlm_icmp_echo_t);
 	rlm_icmp_thread_t *t = talloc_get_type_abort(xctx->mctx->thread, rlm_icmp_thread_t);
@@ -128,12 +129,10 @@ static xlat_action_t xlat_icmp_resume(TALLOC_CTX *ctx, fr_dcursor_t *out,
 	return XLAT_ACTION_DONE;
 }
 
-static void xlat_icmp_cancel(xlat_ctx_t const *xctx, request_t *request, fr_state_signal_t action)
+static void xlat_icmp_cancel(xlat_ctx_t const *xctx, request_t *request, UNUSED fr_signal_t action)
 {
 	rlm_icmp_echo_t *echo = talloc_get_type_abort(xctx->rctx, rlm_icmp_echo_t);
 	rlm_icmp_thread_t *t = talloc_get_type_abort(xctx->mctx->thread, rlm_icmp_thread_t);
-
-	if (action != FR_SIGNAL_CANCEL) return;
 
 	RDEBUG2("Cancelling ICMP request for %pV (counter=%d)", echo->ip, echo->counter);
 
@@ -169,7 +168,7 @@ static xlat_arg_parser_t const xlat_icmp_args[] = {
  */
 static xlat_action_t xlat_icmp(TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 			       xlat_ctx_t const *xctx,
-			       request_t *request, FR_DLIST_HEAD(fr_value_box_list) *in)
+			       request_t *request, fr_value_box_list_t *in)
 {
 	rlm_icmp_t		*inst = talloc_get_type_abort(xctx->mctx->inst->data, rlm_icmp_t);
 	rlm_icmp_thread_t	*t = talloc_get_type_abort(xctx->mctx->thread, rlm_icmp_thread_t);
@@ -261,7 +260,7 @@ static xlat_action_t xlat_icmp(TALLOC_CTX *ctx, UNUSED fr_dcursor_t *out,
 		return XLAT_ACTION_FAIL;
 	}
 
-	return unlang_xlat_yield(request, xlat_icmp_resume, xlat_icmp_cancel, echo);
+	return unlang_xlat_yield(request, xlat_icmp_resume, xlat_icmp_cancel, ~FR_SIGNAL_CANCEL, echo);
 }
 
 static int8_t echo_cmp(void const *one, void const *two)
@@ -469,7 +468,7 @@ static int mod_thread_instantiate(module_thread_inst_ctx_t const *mctx)
 	/*
 	 *	Only bind if we have a src and interface.
 	 */
-	if (src && inst->interface && (fr_socket_bind(fd, src, NULL, inst->interface) < 0)) {
+	if (src && inst->interface && (fr_socket_bind(fd, inst->interface, src, NULL) < 0)) {
 		close(fd);
 		return -1;
 	}
@@ -497,8 +496,8 @@ static int mod_bootstrap(module_inst_ctx_t const *mctx)
 	rlm_icmp_t	*inst = talloc_get_type_abort(mctx->inst->data, rlm_icmp_t);
 	xlat_t		*xlat;
 
-	xlat = xlat_register_module(inst, mctx, mctx->inst->name, xlat_icmp, FR_TYPE_BOOL, 0);
-	xlat_func_args(xlat, xlat_icmp_args);
+	xlat = xlat_func_register_module(inst, mctx, mctx->inst->name, xlat_icmp, FR_TYPE_BOOL);
+	xlat_func_args_set(xlat, xlat_icmp_args);
 
 	FR_TIME_DELTA_BOUND_CHECK("timeout", inst->timeout, >=, fr_time_delta_from_msec(100)); /* 1/10s minimum timeout */
 	FR_TIME_DELTA_BOUND_CHECK("timeout", inst->timeout, <=, fr_time_delta_from_sec(10));
